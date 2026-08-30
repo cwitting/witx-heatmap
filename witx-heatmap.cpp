@@ -1,23 +1,20 @@
 // #include <omp.h>
 
+#include <valhalla/config.h>
+#include <valhalla/tyr/actor.h>
+
+#include <boost/property_tree/ptree.hpp>
 #include <cmath>
 #include <cstdio>
 #include <ctime>
 #include <fstream>
 #include <iostream>
-#include <osrm/coordinate.hpp>
-#include <osrm/engine_config.hpp>
-#include <osrm/json_container.hpp>
-#include <osrm/nearest_parameters.hpp>
-#include <osrm/osrm.hpp>
-#include <osrm/route_parameters.hpp>
-#include <osrm/status.hpp>
+#include <memory>
+#include <optional>
 #include <stdexcept>
 #include <vector>
 
-#include "engine/api/match_parameters.hpp"
 #include "json.hpp"
-#include "util/json_renderer.hpp"
 
 struct Coordinate {
   double lat{};
@@ -32,7 +29,7 @@ struct MatchedRoute {
 };
 
 #define ROUTE_FILE "/home/christian/git/witx-heatmap/data/christian_strava.geojson"
-#define OSRM_DATA_DIR "/home/christian/git/witx-heatmap/data/routing/data/merged"
+#define VALHALLA_CONFIG_FILE "/home/christian/git/witx-heatmap/data/routing/valhalla_data/valhalla.json"
 
 std::vector<Route> load_all_routes() {
   std::vector<Route> routes;
@@ -82,65 +79,42 @@ class TimerLog {
 class RouteMatcher {
  public:
   RouteMatcher() {
-    // Configure OSRM
-    osrm::EngineConfig config;
-
-    config.storage_config = {OSRM_DATA_DIR};
-    config.use_shared_memory = false;
-    config.algorithm = osrm::EngineConfig::Algorithm::MLD;
-
-    // Create OSRM instance
-    fprintf(stderr, "Initializing OSRM with data from: %s\n", OSRM_DATA_DIR);
-    TimerLog timer("OSRM initialization");
-    osrm_ = std::make_unique<osrm::OSRM>(config);
+    fprintf(stderr, "Initializing Valhalla with config from: %s\n", VALHALLA_CONFIG_FILE);
+    TimerLog timer("Valhalla initialization");
+    const auto& config = valhalla::config(VALHALLA_CONFIG_FILE);
+    // auto_cleanup releases the loki/thor/odin workers' caches between calls.
+    actor_ = std::make_unique<valhalla::tyr::actor_t>(config, /*auto_cleanup=*/true);
   }
 
-  // Match routes to the road network using OSRM
+  // Match routes to the road network using Valhalla's trace_route (map matching)
   std::optional<MatchedRoute> matchRoute(const Route& route) {
-    osrm::RouteParameters params;
+    nlohmann::json request;
+    request["costing"] = "pedestrian";
     for (const auto& coord : route) {
-      params.coordinates.emplace_back(osrm::util::FloatLongitude(coord.lon), osrm::util::FloatLatitude(coord.lat));
+      request["shape"].push_back({{"lat", coord.lat}, {"lon", coord.lon}});
     }
 
-    osrm::json::Object result;
-    osrm::MatchParameters match_params;
-    match_params.coordinates = params.coordinates;
-    match_params.annotations = true;
-    match_params.annotations_type = osrm::MatchParameters::AnnotationsType::Nodes;
-    const auto status = osrm_->Match(match_params, result);
-
-    if (status != osrm::Status::Ok) {
-      fprintf(stderr, "OSRM Match failed with status: %d\n", static_cast<int>(status));
+    valhalla::Api api;
+    std::string json_str;
+    try {
+      json_str = actor_->trace_route(request.dump(), nullptr, &api);
+    } catch (const std::exception& e) {
+      fprintf(stderr, "Valhalla trace_route failed: %s\n", e.what());
       return std::nullopt;
     }
+
+    // print the raw json result to stderr
+    fprintf(stderr, "Valhalla trace_route result: %s\n", json_str.c_str());
 
     MatchedRoute matched_route;
     matched_route.route = route;
 
-    // print the raw json result to stderr
-    std::string json_str;
-    osrm::util::json::render(json_str, result);
-    fprintf(stderr, "OSRM Match result: %s\n", json_str.c_str());
-
-    // Add the osm way ids to the matched_route.osm_route vector
-
-    if (result.values.count("matchings") > 0) {
-      const auto& matchings = std::get<osrm::util::json::Array>(result.values["matchings"]);
-      for (const auto& matching : matchings.values) {
-        const auto& matching_obj = std::get<osrm::util::json::Object>(matching);
-        if (matching_obj.values.count("legs") > 0) {
-          const auto& legs = std::get<osrm::util::json::Array>(matching_obj.values.at("legs"));
-          for (const auto& leg : legs.values) {
-            const auto& leg_obj = std::get<osrm::util::json::Object>(leg);
-            if (leg_obj.values.count("annotation") > 0) {
-              const auto& annotation = std::get<osrm::util::json::Object>(leg_obj.values.at("annotation"));
-              if (annotation.values.count("nodes") > 0) {
-                const auto& nodes = std::get<osrm::util::json::Array>(annotation.values.at("nodes"));
-                for (const auto& node : nodes.values) {
-                  matched_route.osm_route.push_back(std::to_string(std::get<osrm::util::json::Number>(node).value));
-                }
-              }
-            }
+    // Add the OSM way ids to the matched_route.osm_route vector
+    for (const auto& trip_route : api.trip().routes()) {
+      for (const auto& leg : trip_route.legs()) {
+        for (const auto& node : leg.node()) {
+          if (node.edge().way_id() != 0) {
+            matched_route.osm_route.push_back(std::to_string(node.edge().way_id()));
           }
         }
       }
@@ -171,7 +145,7 @@ class RouteMatcher {
   }
 
  private:
-  std::unique_ptr<osrm::OSRM> osrm_;
+  std::unique_ptr<valhalla::tyr::actor_t> actor_;
 
   // Decode polyline geometry
   std::vector<Coordinate> decodePolyline(const std::string& encoded) const {
@@ -224,11 +198,11 @@ int main(int argc, char* argv[]) {
   RouteMatcher matcher;
   auto matched_routes = matcher.matchAllRoutes(routes);
   fprintf(stderr, "Matched %zu routes out of %zu\n", matched_routes.size(), routes.size());
-  // for (const auto& matched_route : matched_routes) {
-  //   fprintf(stderr, "Matched route with %zu way ids\n", matched_route.osm_route.size());
-  //   for (const auto& way_id : matched_route.osm_route) {
-  //     std::cout << way_id << " ";
-  //   }
-  // }
+  for (const auto& matched_route : matched_routes) {
+    fprintf(stderr, "Matched route with %zu way ids\n", matched_route.osm_route.size());
+    for (const auto& way_id : matched_route.osm_route) {
+      std::cout << way_id << " ";
+    }
+  }
   std::cout << std::endl;
 }
