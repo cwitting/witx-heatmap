@@ -1,4 +1,4 @@
-cmake_minimum_required(VERSION 3.10)
+cmake_minimum_required(VERSION 3.21)
 project(gravel_heatmap)
 
 set(CMAKE_CXX_STANDARD 20)
@@ -10,30 +10,23 @@ set(CMAKE_CXX_FLAGS "${CMAKE_C_FLAGS} -Wno-stringop-overflow")
 # Find OpenMP
 find_package(OpenMP REQUIRED)
 
-# Find OSRM package
-find_package(PkgConfig REQUIRED)
-pkg_check_modules(OSRM REQUIRED libosrm)
-
-# Find Boost (required by OSRM)
-find_package(Boost REQUIRED COMPONENTS filesystem system iostreams thread)
+# Build OSRM from the in-tree submodule instead of relying on a system
+# install / pkg-config. This exposes the osrm::osrm target (and friends).
+add_subdirectory(osrm-backend)
 
 # Add executable
 add_executable(witx-heatmap witx-heatmap.cpp)
 
-# Include directories
-target_include_directories(witx-heatmap PRIVATE 
-    ${OSRM_INCLUDE_DIRS}
-    ${Boost_INCLUDE_DIRS}
+# Include directories (OSRM headers + the version.hpp it generates at configure time)
+target_include_directories(witx-heatmap PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/osrm-backend/include
+    ${CMAKE_CURRENT_BINARY_DIR}/osrm-backend/include
 )
 
-# Link libraries
-target_link_libraries(witx-heatmap 
-    ${OSRM_LIBRARIES}
-    ${Boost_LIBRARIES}
+# Link libraries (osrm::osrm pulls in its Boost/TBB/LibArchive deps transitively)
+target_link_libraries(witx-heatmap
+    osrm::osrm
     pthread
     OpenMP::OpenMP_CXX
 )
-
-# Compiler flags
-target_compile_options(witx-heatmap PRIVATE ${OSRM_CFLAGS_OTHER})
 

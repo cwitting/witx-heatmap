@@ -11,8 +11,6 @@
 #include <osrm/route_parameters.hpp>
 #include <osrm/status.hpp>
 
-#include "route_planner_lib.cpp"
-
 // ============================================================================
 // Main program
 // ============================================================================
