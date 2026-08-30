@@ -5,20 +5,15 @@
 
 #include <boost/property_tree/ptree.hpp>
 #include <cmath>
+#include <cstdint>
 #include <cstdio>
 #include <ctime>
 #include <fstream>
 #include <iostream>
 #include <memory>
 #include <optional>
-#include <osmium/handler.hpp>
-#include <osmium/handler/node_locations_for_ways.hpp>
-#include <osmium/index/map/sparse_mem_array.hpp>
-#include <osmium/io/any_input.hpp>
-#include <osmium/osm/node_ref.hpp>
-#include <osmium/osm/way.hpp>
-#include <osmium/visitor.hpp>
 #include <stdexcept>
+#include <unordered_map>
 #include <vector>
 
 #include "json.hpp"
@@ -30,9 +25,16 @@ struct Coordinate {
 
 using Route = std::vector<Coordinate>;
 
+struct WaySegment {
+  std::string way_id;
+  uint64_t edge_id{};  // Valhalla's internal directed-edge id: stable identity for the exact
+                       // maximal way-segment traversed, safe to use as a traversal-count key
+  Route geometry;      // The portion of the way's geometry actually traversed by the route
+};
+
 struct MatchedRoute {
   Route route;
-  std::vector<std::string> osm_route;  // Store the OSM route as a way ids
+  std::vector<WaySegment> way_segments;
 };
 
 #define ROUTE_FILE "/home/christian/git/witx-heatmap/data/christian_strava.geojson"
@@ -97,6 +99,7 @@ class RouteMatcher {
   std::optional<MatchedRoute> matchRoute(const Route& route) {
     nlohmann::json request;
     request["costing"] = "pedestrian";
+    request["shape_match"] = "map_snap";
     for (const auto& coord : route) {
       request["shape"].push_back({{"lat", coord.lat}, {"lon", coord.lon}});
     }
@@ -116,13 +119,20 @@ class RouteMatcher {
     MatchedRoute matched_route;
     matched_route.route = route;
 
-    // Add the OSM way ids to the matched_route.osm_route vector
+    // For each traversed edge, slice out the sub-range of the leg shape it covers so we
+    // know exactly which part of the way (not just which way) was used.
     for (const auto& trip_route : api.trip().routes()) {
       for (const auto& leg : trip_route.legs()) {
+        auto leg_shape = decodePolyline(leg.shape());
         for (const auto& node : leg.node()) {
-          if (node.edge().way_id() != 0) {
-            matched_route.osm_route.push_back(std::to_string(node.edge().way_id()));
+          const auto& edge = node.edge();
+          if (edge.way_id() == 0 || leg_shape.empty()) {
+            continue;
           }
+          size_t begin = std::min<size_t>(edge.begin_shape_index(), leg_shape.size() - 1);
+          size_t end = std::min<size_t>(edge.end_shape_index(), leg_shape.size() - 1);
+          Route geometry(leg_shape.begin() + begin, leg_shape.begin() + end + 1);
+          matched_route.way_segments.push_back({std::to_string(edge.way_id()), edge.id(), std::move(geometry)});
         }
       }
     }
@@ -144,7 +154,7 @@ class RouteMatcher {
       }
       matched_routes.push_back(*matched_route);
       matched_count++;
-      if (matched_count >= 30) {
+      if (matched_count >= 300) {
         break;
       }
     }
@@ -188,77 +198,12 @@ class RouteMatcher {
       int dlng = ((result & 1) ? ~(result >> 1) : (result >> 1));
       lng += dlng;
 
-      coordinates.push_back(Coordinate{lat / 1e5, lng / 1e5});
+      // Valhalla's default shape_format is polyline6
+      coordinates.push_back(Coordinate{lat / 1e6, lng / 1e6});
     }
 
     return coordinates;
   }
-};
-
-class OsmFinder : public osmium::handler::Handler {
- public:
-  OsmFinder(const std::string& osm_file) : osm_file_(osm_file) {
-    std::cout << "Opening OSM file: " << osm_file_ << std::endl;
-    osmium::io::File input_file{osm_file_};
-    std::cout << "Creating reader..." << std::endl;
-    osmium::io::Reader reader{input_file};
-
-    // Create index to store node locations
-    using Index = osmium::index::map::SparseMemArray<osmium::unsigned_object_id_type, osmium::Location>;
-    Index index;
-
-    // Handler to store node locations
-    osmium::handler::NodeLocationsForWays<Index> location_handler{index};
-
-    // Build the graph
-    std::cout << "Building graph..." << std::endl;
-    TimerLog timer("Build graph from OSM data");
-    osmium::apply(reader, location_handler, *this);
-  }
-
-  void way(const osmium::Way& way) {
-    // Only process highways (roads)
-    const char* highway = way.tags().get_value_by_key("highway");
-    if (!highway) {
-      return;
-    }
-
-    const char* surface = way.tags().get_value_by_key("surface");
-    if (!surface) {
-      surface = "";
-    }
-
-    // Process nodes in the way
-    const osmium::NodeRefList& nodes_list = way.nodes();
-
-    for (size_t i = 0; i < nodes_list.size(); ++i) {
-      const osmium::NodeRef& node_ref = nodes_list[i];
-      int64_t node_id = node_ref.ref();
-
-      // Add node if it doesn't exist
-      Route& route = ways[way.id()];
-      route.push_back(Coordinate{node_ref.location().lat(), node_ref.location().lon()});
-    }
-  }
-
-  // Find the OSM way ids for a given route
-  std::vector<Route> getRouteFromIds(const std::vector<std::string>& way_ids) {
-    std::vector<Route> routes;
-    for (const auto& way_id_str : way_ids) {
-      int64_t way_id = std::stoll(way_id_str);
-      auto it = ways.find(way_id);
-      if (it != ways.end()) {
-        routes.push_back(it->second);
-      } else {
-        std::cerr << "Way ID " << way_id << " not found in OSM data." << std::endl;
-      }
-    }
-    return routes;
-  }
-
- private:
-  std::string osm_file_;
-  std::unordered_map<int64_t, Route> ways;
 };
 
 // ============================================================================
@@ -270,16 +215,27 @@ int main(int argc, char* argv[]) {
   auto routes = load_all_routes();
   RouteMatcher matcher;
   auto matched_routes = matcher.matchAllRoutes(routes);
-  OsmFinder osm_finder("/home/christian/git/witx-heatmap/data/routing/valhalla_data/merged.osm.pbf");
+  // OsmFinder osm_finder("/home/christian/git/witx-heatmap/data/routing/valhalla_data/merged.osm.pbf");
 
   fprintf(stderr, "Matched %zu routes out of %zu\n", matched_routes.size(), routes.size());
+
+  // Count how many times each physical way-segment (Valhalla directed edge) was traversed
+  // across all matched routes. edge_id is stable across matches as long as the tiles don't
+  // change, and distinguishes direction, unlike way_id which can be shared by many segments.
+  std::unordered_map<uint64_t, int> traversal_counts;
   for (const auto& matched_route : matched_routes) {
-    fprintf(stderr, "Matched route with %zu way ids\n", matched_route.osm_route.size());
-    auto route = osm_finder.getRouteFromIds(matched_route.osm_route);
-    fprintf(stderr, "Retrieved %zu routes from OSM way ids\n", route.size());
-    for (const auto& r : route) {
-      fprintf(stderr, "Route with %zu coordinates\n", r.size());
-      for (const auto& coord : r) {
+    for (const auto& segment : matched_route.way_segments) {
+      traversal_counts[segment.edge_id]++;
+    }
+  }
+
+  for (const auto& matched_route : matched_routes) {
+    fprintf(stderr, "Matched route with %zu way segments\n", matched_route.way_segments.size());
+    for (const auto& segment : matched_route.way_segments) {
+      fprintf(stderr, "Way %s (edge %llu, traversed %d times): %zu coordinates\n", segment.way_id.c_str(),
+              static_cast<unsigned long long>(segment.edge_id), traversal_counts[segment.edge_id],
+              segment.geometry.size());
+      for (const auto& coord : segment.geometry) {
         std::cerr << coord.lat << "," << coord.lon << " ";
       }
       std::cerr << std::endl;
