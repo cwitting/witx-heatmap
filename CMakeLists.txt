@@ -9,6 +9,7 @@ set(CMAKE_CXX_FLAGS "${CMAKE_C_FLAGS} -Wno-stringop-overflow")
 
 # Find OpenMP
 find_package(OpenMP REQUIRED)
+find_package(OpenCV REQUIRED)
 
 # Valhalla's ptree config API only needs Boost headers (property_tree).
 find_package(Boost 1.71 REQUIRED)
@@ -44,13 +45,10 @@ add_executable(witx-heatmap witx-heatmap.cpp)
 target_include_directories(witx-heatmap PRIVATE
     ${VALHALLA_INCLUDE_DIRS}
     ${VALHALLA_DEPS_INCLUDE_DIRS}
+    ${VALHALLA_STATIC_INCLUDE_DIRS}
+    ${OpenCV_INCLUDE_DIRS}
 )
-target_compile_options(witx-heatmap PRIVATE ${VALHALLA_CFLAGS_OTHER} ${VALHALLA_DEPS_CFLAGS_OTHER})
-
-target_include_directories(witx-heatmap PRIVATE
-  ${VALHALLA_STATIC_INCLUDE_DIRS}
-)
-target_compile_options(witx-heatmap PRIVATE ${VALHALLA_STATIC_CFLAGS_OTHER})
+target_compile_options(witx-heatmap PRIVATE ${VALHALLA_CFLAGS_OTHER} ${VALHALLA_DEPS_CFLAGS_OTHER} ${VALHALLA_STATIC_CFLAGS_OTHER})
 
 # Link libraries
 target_link_directories(witx-heatmap PRIVATE ${VALHALLA_LIBRARY_DIRS} ${VALHALLA_DEPS_LIBRARY_DIRS})
@@ -61,5 +59,6 @@ target_link_libraries(witx-heatmap
     Boost::boost
     pthread
     OpenMP::OpenMP_CXX
+    ${OpenCV_LIBS}
 )
 
