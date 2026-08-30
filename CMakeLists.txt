@@ -25,7 +25,7 @@ target_include_directories(witx-heatmap PRIVATE
 
 # Link libraries (osrm::osrm pulls in its Boost/TBB/LibArchive deps transitively)
 target_link_libraries(witx-heatmap
-    osrm::osrm
+    osrm
     pthread
     OpenMP::OpenMP_CXX
 )
