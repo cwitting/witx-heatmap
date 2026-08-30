@@ -11,6 +11,13 @@
 #include <iostream>
 #include <memory>
 #include <optional>
+#include <osmium/handler.hpp>
+#include <osmium/handler/node_locations_for_ways.hpp>
+#include <osmium/index/map/sparse_mem_array.hpp>
+#include <osmium/io/any_input.hpp>
+#include <osmium/osm/node_ref.hpp>
+#include <osmium/osm/way.hpp>
+#include <osmium/visitor.hpp>
 #include <stdexcept>
 #include <vector>
 
@@ -104,7 +111,7 @@ class RouteMatcher {
     }
 
     // print the raw json result to stderr
-    fprintf(stderr, "Valhalla trace_route result: %s\n", json_str.c_str());
+    // fprintf(stderr, "Valhalla trace_route result: %s\n", json_str.c_str());
 
     MatchedRoute matched_route;
     matched_route.route = route;
@@ -188,6 +195,72 @@ class RouteMatcher {
   }
 };
 
+class OsmFinder : public osmium::handler::Handler {
+ public:
+  OsmFinder(const std::string& osm_file) : osm_file_(osm_file) {
+    std::cout << "Opening OSM file: " << osm_file_ << std::endl;
+    osmium::io::File input_file{osm_file_};
+    std::cout << "Creating reader..." << std::endl;
+    osmium::io::Reader reader{input_file};
+
+    // Create index to store node locations
+    using Index = osmium::index::map::SparseMemArray<osmium::unsigned_object_id_type, osmium::Location>;
+    Index index;
+
+    // Handler to store node locations
+    osmium::handler::NodeLocationsForWays<Index> location_handler{index};
+
+    // Build the graph
+    std::cout << "Building graph..." << std::endl;
+    TimerLog timer("Build graph from OSM data");
+    osmium::apply(reader, location_handler, *this);
+  }
+
+  void way(const osmium::Way& way) {
+    // Only process highways (roads)
+    const char* highway = way.tags().get_value_by_key("highway");
+    if (!highway) {
+      return;
+    }
+
+    const char* surface = way.tags().get_value_by_key("surface");
+    if (!surface) {
+      surface = "";
+    }
+
+    // Process nodes in the way
+    const osmium::NodeRefList& nodes_list = way.nodes();
+
+    for (size_t i = 0; i < nodes_list.size(); ++i) {
+      const osmium::NodeRef& node_ref = nodes_list[i];
+      int64_t node_id = node_ref.ref();
+
+      // Add node if it doesn't exist
+      Route& route = ways[way.id()];
+      route.push_back(Coordinate{node_ref.location().lat(), node_ref.location().lon()});
+    }
+  }
+
+  // Find the OSM way ids for a given route
+  std::vector<Route> getRouteFromIds(const std::vector<std::string>& way_ids) {
+    std::vector<Route> routes;
+    for (const auto& way_id_str : way_ids) {
+      int64_t way_id = std::stoll(way_id_str);
+      auto it = ways.find(way_id);
+      if (it != ways.end()) {
+        routes.push_back(it->second);
+      } else {
+        std::cerr << "Way ID " << way_id << " not found in OSM data." << std::endl;
+      }
+    }
+    return routes;
+  }
+
+ private:
+  std::string osm_file_;
+  std::unordered_map<int64_t, Route> ways;
+};
+
 // ============================================================================
 // Main program
 // ============================================================================
@@ -197,12 +270,21 @@ int main(int argc, char* argv[]) {
   auto routes = load_all_routes();
   RouteMatcher matcher;
   auto matched_routes = matcher.matchAllRoutes(routes);
+  OsmFinder osm_finder("/home/christian/git/witx-heatmap/data/routing/valhalla_data/merged.osm.pbf");
+
   fprintf(stderr, "Matched %zu routes out of %zu\n", matched_routes.size(), routes.size());
   for (const auto& matched_route : matched_routes) {
     fprintf(stderr, "Matched route with %zu way ids\n", matched_route.osm_route.size());
-    for (const auto& way_id : matched_route.osm_route) {
-      std::cout << way_id << " ";
+    auto route = osm_finder.getRouteFromIds(matched_route.osm_route);
+    fprintf(stderr, "Retrieved %zu routes from OSM way ids\n", route.size());
+    for (const auto& r : route) {
+      fprintf(stderr, "Route with %zu coordinates\n", r.size());
+      for (const auto& coord : r) {
+        std::cerr << coord.lat << "," << coord.lon << " ";
+      }
+      std::cerr << std::endl;
     }
+    std::cerr << std::endl;
   }
-  std::cout << std::endl;
+  std::cerr << std::endl;
 }

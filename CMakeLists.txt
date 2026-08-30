@@ -35,6 +35,13 @@ pkg_check_modules(VALHALLA_DEPS REQUIRED
     liblz4
 )
 
+find_path(OSMIUM_INCLUDE_DIR osmium/osm.hpp)
+if(NOT OSMIUM_INCLUDE_DIR)
+    message(FATAL_ERROR "libosmium not found. Please install libosmium-dev")
+endif()
+
+find_path(PROTOZERO_INCLUDE_DIR protozero/pbf_reader.hpp)
+
 # Add executable
 add_executable(witx-heatmap witx-heatmap.cpp)
 
@@ -44,7 +51,11 @@ target_include_directories(witx-heatmap PRIVATE
 )
 target_compile_options(witx-heatmap PRIVATE ${VALHALLA_CFLAGS_OTHER} ${VALHALLA_DEPS_CFLAGS_OTHER})
 
-target_include_directories(witx-heatmap PRIVATE ${VALHALLA_STATIC_INCLUDE_DIRS})
+target_include_directories(witx-heatmap PRIVATE
+  ${VALHALLA_STATIC_INCLUDE_DIRS}
+  ${OSMIUM_INCLUDE_DIR}
+  ${PROTOZERO_INCLUDE_DIR}
+)
 target_compile_options(witx-heatmap PRIVATE ${VALHALLA_STATIC_CFLAGS_OTHER})
 
 # Link libraries
@@ -56,5 +67,8 @@ target_link_libraries(witx-heatmap
     Boost::boost
     pthread
     OpenMP::OpenMP_CXX
+    bz2
+    expat
+    z
 )
 
