@@ -182,7 +182,7 @@ class Tile {
     }
   }
 
-  void paint(const std::vector<SquadratTile>& squadrat_tiles) {
+  void paint(const std::set<SquadratTile>& squadrat_tiles) {
     for (const auto& tile : squadrat_tiles) {
       auto [min_coord, max_coord] = tile.getBBox();
       int x1 = static_cast<int>((min_coord.lon - min_lon_) / (max_lon_ - min_lon_) * 256);
@@ -417,9 +417,7 @@ class TileGenerator {
  public:
   TileGenerator(const std::vector<MatchedRoute>& matched_routes) {
     for (const auto& matched_route : matched_routes) {
-      for (const auto& tile : matched_route.squadrat_tiles) {
-        squadrat_tiles_.push_back(tile);
-      }
+      squadrat_tiles_.insert(matched_route.squadrat_tiles.begin(), matched_route.squadrat_tiles.end());
 
       for (const auto& segment : matched_route.way_segments) {
         auto it = traversal_counts_.find(segment.edge_id);
@@ -466,7 +464,7 @@ class TileGenerator {
   static std::mutex cache_mutex_;
   std::unordered_map<TileKey, Tile, TileKey::Hash> tile_cache_;
   std::unordered_map<std::size_t, WaySegment> traversal_counts_;
-  std::vector<SquadratTile> squadrat_tiles_;
+  std::set<SquadratTile> squadrat_tiles_;
 };
 
 std::mutex TileGenerator::cache_mutex_;
