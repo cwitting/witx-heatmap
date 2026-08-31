@@ -152,6 +152,36 @@ class Tile {
     // fprintf(stderr, "Painted %d way segments on tile z=%d, x=%d, y=%d\n", count, z_, x_, y_);
   }
 
+  // Draw the full squadrat grid (every 1km line), regardless of which tiles were visited
+  void paintGrid() {
+    if (z_ < 11) {
+      return;  // Only draw grid for zoom levels 11 and above
+    }
+    int alpha = 100;  // Adjust the alpha value for desired opacity
+    if (z_ >= 14) {
+      alpha = 200;  // Make grid lines more visible at higher zoom levels
+    }
+    auto [min_x, min_y] = latLonToMeters(min_lat_, min_lon_);
+    auto [max_x, max_y] = latLonToMeters(max_lat_, max_lon_);
+
+    long long x_start = static_cast<long long>(std::floor(min_x / SQUADRAT_TILE_SIZE_METERS));
+    long long x_end = static_cast<long long>(std::ceil(max_x / SQUADRAT_TILE_SIZE_METERS));
+    cv::Scalar grey(20, 20, 20, alpha);
+    for (long long i = x_start; i <= x_end; ++i) {
+      auto [lat, lon] = metersToLatLon(i * SQUADRAT_TILE_SIZE_METERS, 0.0);
+      int px = static_cast<int>((lon - min_lon_) / (max_lon_ - min_lon_) * 256);
+      cv::line(image_data_, cv::Point(px, 0), cv::Point(px, 256), grey, 1, cv::LINE_AA);
+    }
+
+    long long y_start = static_cast<long long>(std::floor(min_y / SQUADRAT_TILE_SIZE_METERS));
+    long long y_end = static_cast<long long>(std::ceil(max_y / SQUADRAT_TILE_SIZE_METERS));
+    for (long long j = y_start; j <= y_end; ++j) {
+      auto [lat, lon] = metersToLatLon(0.0, j * SQUADRAT_TILE_SIZE_METERS);
+      int py = static_cast<int>((max_lat_ - lat) / (max_lat_ - min_lat_) * 256);
+      cv::line(image_data_, cv::Point(0, py), cv::Point(256, py), grey, 1, cv::LINE_AA);
+    }
+  }
+
   void paint(const std::vector<SquadratTile>& squadrat_tiles) {
     for (const auto& tile : squadrat_tiles) {
       auto [min_coord, max_coord] = tile.getBBox();
@@ -405,6 +435,7 @@ class TileGenerator {
   Tile generateTile(int z, int x, int y) {
     Tile tile(z, x, y);
     // tile.paint(traversal_counts_);
+    tile.paintGrid();
     tile.paint(squadrat_tiles_);
     return tile;
   }
