@@ -22,7 +22,7 @@
     "hierarchy": true,
     "shortcuts": true,
     "keep_all_osm_node_ids": false,
-    "keep_osm_node_ids": false,
+    "keep_osm_node_ids": true,
     "include_platforms": false,
     "include_driveways": true,
     "include_construction": false,
