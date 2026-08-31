@@ -385,11 +385,10 @@ int main(int argc, char** argv) {
 
   // Print program name
   fprintf(stderr, "Witx Heatmap Route Planner\n");
-  auto routes = load_all_routes();
-  RouteMatcher matcher;
 
 #if !RESTORE
-
+  auto routes = load_all_routes();
+  RouteMatcher matcher;
   auto matched_routes = matcher.matchAllRoutes(routes);
   nlohmann::json heatmap_json = matched_routes;
   std::ofstream heatmap_file(HEATMAP_FILE);
