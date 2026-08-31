@@ -45,9 +45,18 @@ struct WaySegment {
   int traversal_count{};  // How many times this way-segment was traversed across all matched routes
 
   bool inBBox(double min_lat, double min_lon, double max_lat, double max_lon) const {
-    for (const auto& coord : geometry) {
+    for (int i = 0; i < geometry.size(); ++i) {
+      const auto& coord = geometry[i];
       if (coord.lat >= min_lat && coord.lat <= max_lat && coord.lon >= min_lon && coord.lon <= max_lon) {
         return true;
+      }
+      if (i > 0) {
+        const auto& prev_coord = geometry[i - 1];
+        // Check if the line segment between prev_coord and coord intersects the bounding box
+        if ((prev_coord.lat < min_lat && coord.lat > max_lat) || (prev_coord.lat > max_lat && coord.lat < min_lat) ||
+            (prev_coord.lon < min_lon && coord.lon > max_lon) || (prev_coord.lon > max_lon && coord.lon < min_lon)) {
+          return true;
+        }
       }
     }
     return false;
