@@ -11,12 +11,15 @@
 #include <ctime>
 #include <fstream>
 #include <iostream>
+#include <limits>
+#include <map>
 #include <memory>
 #include <mutex>
 #include <opencv2/core/mat.hpp>
 #include <opencv4/opencv2/opencv.hpp>
 #include <optional>
 #include <stdexcept>
+#include <tuple>
 #include <unordered_map>
 #include <vector>
 
@@ -26,7 +29,7 @@
 #define ROUTE_FILE "/home/christian/git/witx-heatmap/data/christian_strava2.geojson"
 #define VALHALLA_CONFIG_FILE "/home/christian/git/witx-heatmap/data/routing/valhalla_data/valhalla.json"
 #define HEATMAP_FILE "/home/christian/git/witx-heatmap/data/heatmap.json"
-#define RESTORE 0
+#define RESTORE 1
 
 struct Coordinate {
   double lat{};
@@ -96,6 +99,8 @@ struct SquadratTile {
     return std::tie(squadrat_x, squadrat_y) < std::tie(other.squadrat_x, other.squadrat_y);
   }
 
+  SquadratTile() = default;  // needed for JSON deserialization
+
   // Generate the tile from a point (lat, lon) in degrees
   SquadratTile(double lat, double lon) {
     // Convert to EPSG 3857 meters
@@ -117,6 +122,161 @@ struct SquadratTile {
 };
 NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE(SquadratTile, squadrat_x, squadrat_y)
 
+struct MatchedRoute {
+  Route route;
+  std::vector<WaySegment> way_segments;
+  std::set<SquadratTile> squadrat_tiles;
+};
+
+NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE(MatchedRoute, route, way_segments, squadrat_tiles)
+
+static double haversineDistance(const Coordinate& coord1, const Coordinate& coord2) {
+  constexpr double EARTH_RADIUS_KM = 6371.0;
+  double lat1_rad = coord1.lat * M_PI / 180.0;
+  double lon1_rad = coord1.lon * M_PI / 180.0;
+  double lat2_rad = coord2.lat * M_PI / 180.0;
+  double lon2_rad = coord2.lon * M_PI / 180.0;
+
+  double dlat = lat2_rad - lat1_rad;
+  double dlon = lon2_rad - lon1_rad;
+
+  double a = std::sin(dlat / 2) * std::sin(dlat / 2) +
+             std::cos(lat1_rad) * std::cos(lat2_rad) * std::sin(dlon / 2) * std::sin(dlon / 2);
+  double c = 2 * std::atan2(std::sqrt(a), std::sqrt(1 - a));
+
+  return EARTH_RADIUS_KM * c;
+}
+
+class AlphaShape {
+ public:
+  // alpha is the max circumradius (in meters) a Delaunay triangle may have to stay in the shape;
+  // smaller alpha follows the point cloud's concavities more tightly, larger alpha tends to the convex hull.
+  AlphaShape(const std::vector<MatchedRoute>& matched_routes, double alpha) : alpha_(alpha) {
+    constexpr Coordinate START_COORD{55.59784, 11.97298};
+    constexpr double TOLERANCE_KM = 0.2;
+    for (const auto& matched_route : matched_routes) {
+      if (matched_route.route.empty()) {
+        continue;
+      }
+      const auto& start_coord = matched_route.route.front();
+      double distance_km = haversineDistance(start_coord, START_COORD);
+      if (distance_km > TOLERANCE_KM) {
+        continue;
+      }
+      const auto& end_coord = matched_route.route.back();
+      double end_distance_km = haversineDistance(end_coord, START_COORD);
+      if (end_distance_km > TOLERANCE_KM) {
+        continue;
+      }
+
+      matched_routes_.push_back(matched_route);
+
+      for (const auto& coord : matched_route.route) {
+        points_.emplace_back(coord.lat, coord.lon);
+      }
+    }
+    compute();
+  }
+
+  const std::vector<std::pair<Coordinate, Coordinate>>& getBoundaryEdges() const { return boundary_edges_; }
+
+  void compute() {
+    boundary_edges_.clear();
+    if (points_.size() < 3) {
+      return;
+    }
+
+    // Project to planar meters so the alpha radius test means the same thing everywhere.
+    std::vector<cv::Point2f> projected;
+    projected.reserve(points_.size());
+    double min_x = std::numeric_limits<double>::max();
+    double min_y = std::numeric_limits<double>::max();
+    double max_x = std::numeric_limits<double>::lowest();
+    double max_y = std::numeric_limits<double>::lowest();
+    for (const auto& [lat, lon] : points_) {
+      auto [x, y] = latLonToMeters(lat, lon);
+      min_x = std::min(min_x, x);
+      min_y = std::min(min_y, y);
+      max_x = std::max(max_x, x);
+      max_y = std::max(max_y, y);
+      projected.emplace_back(static_cast<float>(x), static_cast<float>(y));
+    }
+
+    // Subdiv2D requires a rect that strictly contains every inserted point.
+    cv::Rect2f bounds(static_cast<float>(min_x - 1.0), static_cast<float>(min_y - 1.0),
+                      static_cast<float>(max_x - min_x + 2.0), static_cast<float>(max_y - min_y + 2.0));
+    cv::Subdiv2D subdiv(bounds);
+    for (const auto& p : projected) {
+      subdiv.insert(p);
+    }
+
+    std::vector<cv::Vec6f> triangles;
+    subdiv.getTriangleList(triangles);
+
+    // An edge that borders exactly one alpha-valid triangle lies on the boundary of the shape.
+    auto edge_key = [](cv::Point2f a, cv::Point2f b) {
+      if (std::make_pair(a.x, a.y) > std::make_pair(b.x, b.y)) {
+        std::swap(a, b);
+      }
+      return std::make_tuple(a.x, a.y, b.x, b.y);
+    };
+    std::map<std::tuple<float, float, float, float>, int> edge_counts;
+    std::map<std::tuple<float, float, float, float>, std::pair<cv::Point2f, cv::Point2f>> edge_points;
+
+    for (const auto& t : triangles) {
+      cv::Point2f p1(t[0], t[1]);
+      cv::Point2f p2(t[2], t[3]);
+      cv::Point2f p3(t[4], t[5]);
+
+      // Subdiv2D generates extra triangles connecting to its bounding rect; ignore those.
+      if (!bounds.contains(p1) || !bounds.contains(p2) || !bounds.contains(p3)) {
+        continue;
+      }
+
+      if (circumradius(p1, p2, p3) > alpha_) {
+        continue;
+      }
+
+      for (const auto& [a, b] : {std::make_pair(p1, p2), std::make_pair(p2, p3), std::make_pair(p3, p1)}) {
+        auto key = edge_key(a, b);
+        edge_counts[key]++;
+        edge_points[key] = {a, b};
+      }
+    }
+
+    for (const auto& [key, count] : edge_counts) {
+      if (count != 1) {
+        continue;
+      }
+      const auto& [a, b] = edge_points[key];
+      auto [lat1, lon1] = metersToLatLon(a.x, a.y);
+      auto [lat2, lon2] = metersToLatLon(b.x, b.y);
+      boundary_edges_.emplace_back(Coordinate{lat1, lon1}, Coordinate{lat2, lon2});
+    }
+  }
+
+  const std::vector<MatchedRoute>& getMatchedRoutes() const { return matched_routes_; }
+
+ private:
+  // Circumradius of triangle (a, b, c); returns +inf for degenerate (near-zero-area) triangles.
+  static double circumradius(cv::Point2f a, cv::Point2f b, cv::Point2f c) {
+    double ab = cv::norm(a - b);
+    double bc = cv::norm(b - c);
+    double ca = cv::norm(c - a);
+    double s = (ab + bc + ca) / 2.0;
+    double area = std::sqrt(std::max(0.0, s * (s - ab) * (s - bc) * (s - ca)));
+    if (area < 1e-9) {
+      return std::numeric_limits<double>::infinity();
+    }
+    return (ab * bc * ca) / (4.0 * area);
+  }
+
+  double alpha_;
+  std::vector<std::pair<double, double>> points_;
+  std::vector<std::pair<Coordinate, Coordinate>> boundary_edges_;
+  std::vector<MatchedRoute> matched_routes_;
+};
+
 class Tile {
  public:
   Tile(int z, int x, int y) : image_data_(256, 256, CV_8UC4, cv::Scalar(0, 0, 0, 0)), z_(z), x_(x), y_(y) {
@@ -128,7 +288,7 @@ class Tile {
     //         min_lat_, max_lat_, min_lon_, max_lon_);
   }
 
-  void paint(const std::unordered_map<std::size_t, WaySegment>& way_segments) {
+  void paintMatches(const std::unordered_map<std::size_t, WaySegment>& way_segments) {
     int count = 0;
     for (const auto& [key, segment] : way_segments) {
       if (!segment.inBBox(min_lat_, min_lon_, max_lat_, max_lon_)) {
@@ -146,6 +306,26 @@ class Tile {
         int x2 = static_cast<int>((p2.lon - min_lon_) / (max_lon_ - min_lon_) * 256);
         int y2 = static_cast<int>((max_lat_ - p2.lat) / (max_lat_ - min_lat_) * 256);
         int alpha = std::min(255, segment.traversal_count * 10 + 50);  // Adjust the multiplier for desired opacity
+        cv::line(image_data_, cv::Point(x1, y1), cv::Point(x2, y2), cv::Scalar(255, 0, 0, 255), 2, cv::LINE_AA);
+      }
+    }
+    // fprintf(stderr, "Painted %d way segments on tile z=%d, x=%d, y=%d\n", count, z_, x_, y_);
+  }
+
+  void paintRoute(const std::vector<MatchedRoute>& matched_routes) {
+    int count = 0;
+    for (const auto& matched_route : matched_routes) {
+      for (size_t i = 1; i < matched_route.route.size(); ++i) {
+        const auto& p1 = matched_route.route[i - 1];
+        const auto& p2 = matched_route.route[i];
+        // fprintf(stderr, "Painting way %s (edge %llu) segment from (%.6f, %.6f) to (%.6f, %.6f)\n",
+        //         segment.way_id.c_str(), static_cast<unsigned long long>(segment.edge_id), p1.lat, p1.lon, p2.lat,
+        //         p2.lon);
+        int x1 = static_cast<int>((p1.lon - min_lon_) / (max_lon_ - min_lon_) * 256);
+        int y1 = static_cast<int>((max_lat_ - p1.lat) / (max_lat_ - min_lat_) * 256);
+        int x2 = static_cast<int>((p2.lon - min_lon_) / (max_lon_ - min_lon_) * 256);
+        int y2 = static_cast<int>((max_lat_ - p2.lat) / (max_lat_ - min_lat_) * 256);
+        int alpha = 255;  // Adjust the multiplier for desired opacity
         cv::line(image_data_, cv::Point(x1, y1), cv::Point(x2, y2), cv::Scalar(255, 0, 0, 255), 2, cv::LINE_AA);
       }
     }
@@ -193,6 +373,17 @@ class Tile {
     }
   }
 
+  void paint(const AlphaShape& alpha_shape) {
+    paintRoute(alpha_shape.getMatchedRoutes());
+    for (const auto& [p1, p2] : alpha_shape.getBoundaryEdges()) {
+      int x1 = static_cast<int>((p1.lon - min_lon_) / (max_lon_ - min_lon_) * 256);
+      int y1 = static_cast<int>((max_lat_ - p1.lat) / (max_lat_ - min_lat_) * 256);
+      int x2 = static_cast<int>((p2.lon - min_lon_) / (max_lon_ - min_lon_) * 256);
+      int y2 = static_cast<int>((max_lat_ - p2.lat) / (max_lat_ - min_lat_) * 256);
+      cv::line(image_data_, cv::Point(x1, y1), cv::Point(x2, y2), cv::Scalar(255, 0, 255, 200), 3, cv::LINE_AA);
+    }
+  }
+
   cv::Mat getImage() const { return image_data_; }
 
   int getZ() const { return z_; }
@@ -214,14 +405,6 @@ class Tile {
   double min_lon_;
   double max_lon_;
 };
-
-struct MatchedRoute {
-  Route route;
-  std::vector<WaySegment> way_segments;
-  std::set<SquadratTile> squadrat_tiles;
-};
-
-NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE(MatchedRoute, route, way_segments, squadrat_tiles)
 
 std::vector<Route> load_all_routes() {
   std::vector<Route> routes;
@@ -415,7 +598,8 @@ class TileKey {
 
 class TileGenerator {
  public:
-  TileGenerator(const std::vector<MatchedRoute>& matched_routes) {
+  TileGenerator(const std::vector<MatchedRoute>& matched_routes)
+      : matched_routes_(matched_routes), alpha_shape_(matched_routes, 7000) {
     for (const auto& matched_route : matched_routes) {
       squadrat_tiles_.insert(matched_route.squadrat_tiles.begin(), matched_route.squadrat_tiles.end());
 
@@ -433,8 +617,9 @@ class TileGenerator {
   Tile generateTile(int z, int x, int y) {
     Tile tile(z, x, y);
     // tile.paint(traversal_counts_);
-    tile.paintGrid();
-    tile.paint(squadrat_tiles_);
+    // tile.paintGrid();
+    // tile.paint(squadrat_tiles_);
+    tile.paint(alpha_shape_);
     return tile;
   }
 
@@ -464,6 +649,8 @@ class TileGenerator {
   static std::mutex cache_mutex_;
   std::unordered_map<TileKey, Tile, TileKey::Hash> tile_cache_;
   std::unordered_map<std::size_t, WaySegment> traversal_counts_;
+  std::vector<MatchedRoute> matched_routes_;
+  AlphaShape alpha_shape_;
   std::set<SquadratTile> squadrat_tiles_;
 };
 
@@ -517,7 +704,7 @@ int main(int argc, char** argv) {
   TimerLog restore_timer("Loading matched routes from heatmap.json");
   nlohmann::json heatmap_json;
   heatmap_file >> heatmap_json;
-  std::vector<MatchedRoute> matched_routes = heatmap_json.get<std::vector<MatchedRoute> >();
+  std::vector<MatchedRoute> matched_routes = heatmap_json.get<std::vector<MatchedRoute>>();
   restore_timer.stop();
 #endif
 
