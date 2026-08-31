@@ -5,12 +5,14 @@
 
 #include <boost/property_tree/ptree.hpp>
 #include <cmath>
+#include <cstddef>
 #include <cstdint>
 #include <cstdio>
 #include <ctime>
 #include <fstream>
 #include <iostream>
 #include <memory>
+#include <opencv2/core/mat.hpp>
 #include <opencv4/opencv2/opencv.hpp>
 #include <optional>
 #include <stdexcept>
@@ -20,18 +22,94 @@
 #include "httplib.h"
 #include "json.hpp"
 
+#define ROUTE_FILE "/home/christian/git/witx-heatmap/data/christian_strava2.geojson"
+#define VALHALLA_CONFIG_FILE "/home/christian/git/witx-heatmap/data/routing/valhalla_data/valhalla.json"
+#define HEATMAP_FILE "/home/christian/git/witx-heatmap/data/heatmap.json"
+#define RESTORE 1
+
 struct Coordinate {
   double lat{};
   double lon{};
 };
 
+NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE(Coordinate, lat, lon)
+
 using Route = std::vector<Coordinate>;
 
 struct WaySegment {
   std::string way_id;
-  uint64_t edge_id{};  // Valhalla's internal directed-edge id: stable identity for the exact
-                       // maximal way-segment traversed, safe to use as a traversal-count key
-  Route geometry;      // The portion of the way's geometry actually traversed by the route
+  uint64_t edge_id{};     // Valhalla's internal directed-edge id: stable identity for the exact
+                          // maximal way-segment traversed, safe to use as a traversal-count key
+  Route geometry;         // The portion of the way's geometry actually traversed by the route
+  int traversal_count{};  // How many times this way-segment was traversed across all matched routes
+
+  bool inBBox(double min_lat, double min_lon, double max_lat, double max_lon) const {
+    for (const auto& coord : geometry) {
+      if (coord.lat >= min_lat && coord.lat <= max_lat && coord.lon >= min_lon && coord.lon <= max_lon) {
+        return true;
+      }
+    }
+    return false;
+  }
+};
+
+NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE(WaySegment, way_id, edge_id, geometry, traversal_count)
+
+class Tile {
+ public:
+  Tile(int z, int x, int y) : image_data_(256, 256, CV_8UC4, cv::Scalar(0, 0, 0, 0)), z_(z), x_(x), y_(y) {
+    min_lon_ = x_ / std::pow(2.0, z_) * 360.0 - 180.0;
+    max_lon_ = (x_ + 1) / std::pow(2.0, z_) * 360.0 - 180.0;
+    min_lat_ = std::atan(std::sinh(M_PI * (1 - 2 * (y_ + 1) / std::pow(2.0, z_)))) * 180.0 / M_PI;
+    max_lat_ = std::atan(std::sinh(M_PI * (1 - 2 * y_ / std::pow(2.0, z_)))) * 180.0 / M_PI;
+    // fprintf(stderr, "Tile z=%d, x=%d, y=%d: min_lat=%.6f, max_lat=%.6f, min_lon=%.6f, max_lon=%.6f\n", z_, x_, y_,
+    //         min_lat_, max_lat_, min_lon_, max_lon_);
+  }
+
+  void paint(const std::unordered_map<std::size_t, WaySegment>& way_segments) {
+    int count = 0;
+    for (const auto& [key, segment] : way_segments) {
+      if (!segment.inBBox(min_lat_, min_lon_, max_lat_, max_lon_)) {
+        continue;
+      }
+      count++;
+      for (size_t i = 1; i < segment.geometry.size(); ++i) {
+        const auto& p1 = segment.geometry[i - 1];
+        const auto& p2 = segment.geometry[i];
+        // fprintf(stderr, "Painting way %s (edge %llu) segment from (%.6f, %.6f) to (%.6f, %.6f)\n",
+        //         segment.way_id.c_str(), static_cast<unsigned long long>(segment.edge_id), p1.lat, p1.lon, p2.lat,
+        //         p2.lon);
+        int x1 = static_cast<int>((p1.lon - min_lon_) / (max_lon_ - min_lon_) * 256);
+        int y1 = static_cast<int>((max_lat_ - p1.lat) / (max_lat_ - min_lat_) * 256);
+        int x2 = static_cast<int>((p2.lon - min_lon_) / (max_lon_ - min_lon_) * 256);
+        int y2 = static_cast<int>((max_lat_ - p2.lat) / (max_lat_ - min_lat_) * 256);
+        int alpha = std::min(255, segment.traversal_count * 10 + 50);  // Adjust the multiplier for desired opacity
+        cv::line(image_data_, cv::Point(x1, y1), cv::Point(x2, y2), cv::Scalar(255, 0, 0, 255), 2);
+      }
+    }
+    // fprintf(stderr, "Painted %d way segments on tile z=%d, x=%d, y=%d\n", count, z_, x_, y_);
+  }
+
+  cv::Mat getImage() const { return image_data_; }
+
+  int getZ() const { return z_; }
+  int getX() const { return x_; }
+  int getY() const { return y_; }
+
+  double minLon() const { return min_lon_; }
+  double maxLon() const { return max_lon_; }
+  double minLat() const { return min_lat_; }
+  double maxLat() const { return max_lat_; }
+
+ private:
+  cv::Mat image_data_;
+  int z_;
+  int x_;
+  int y_;
+  double min_lat_;
+  double max_lat_;
+  double min_lon_;
+  double max_lon_;
 };
 
 struct MatchedRoute {
@@ -39,8 +117,7 @@ struct MatchedRoute {
   std::vector<WaySegment> way_segments;
 };
 
-#define ROUTE_FILE "/home/christian/git/witx-heatmap/data/christian_strava.geojson"
-#define VALHALLA_CONFIG_FILE "/home/christian/git/witx-heatmap/data/routing/valhalla_data/valhalla.json"
+NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE(MatchedRoute, route, way_segments)
 
 std::vector<Route> load_all_routes() {
   std::vector<Route> routes;
@@ -102,6 +179,7 @@ class RouteMatcher {
     nlohmann::json request;
     request["costing"] = "pedestrian";
     request["shape_match"] = "map_snap";
+    request["trace_options"] = {{"search_radius", 50}, {"gps_accuracy", 20}};
     for (const auto& coord : route) {
       request["shape"].push_back({{"lat", coord.lat}, {"lon", coord.lon}});
     }
@@ -146,6 +224,7 @@ class RouteMatcher {
     std::vector<MatchedRoute> matched_routes;
     int matched_count = 0;
     int total_count = 0;
+    matched_routes.reserve(routes.size());
     for (const auto& route : routes) {
       TimerLog timer("Matching route " + std::to_string(matched_count + 1) + "/" + std::to_string(total_count + 1) +
                      "/" + std::to_string(routes.size()));
@@ -156,9 +235,9 @@ class RouteMatcher {
       }
       matched_routes.push_back(*matched_route);
       matched_count++;
-      if (matched_count >= 30) {
-        break;
-      }
+      // if (matched_count >= 300) {
+      //   break;
+      // }
     }
     return matched_routes;
   }
@@ -208,29 +287,65 @@ class RouteMatcher {
   }
 };
 
-cv::Mat generate_placeholder_tile(int z, int x, int y) {
-  // Generate a simple 256x256 PNG image with a solid color
-  const int width = 256;
-  const int height = 256;
-  cv::Mat png_data(height, width, CV_8UC4, cv::Scalar(255, 255, 255, 255));
+class TileKey {
+ public:
+  TileKey(int z, int x, int y) : z_(z), x_(x), y_(y) {}
 
-  // Fill with a color based on the tile coordinates for demonstration
-  unsigned char r = static_cast<unsigned char>((x * 37) % 256);
-  unsigned char g = static_cast<unsigned char>((y * 59) % 256);
-  unsigned char b = static_cast<unsigned char>((z * 83) % 256);
+  bool operator==(const TileKey& other) const { return z_ == other.z_ && x_ == other.x_ && y_ == other.y_; }
 
-  for (int y_idx = 0; y_idx < height; ++y_idx) {
-    for (int x_idx = 0; x_idx < width; ++x_idx) {
-      cv::Vec4b& pixel = png_data.at<cv::Vec4b>(y_idx, x_idx);
-      pixel[0] = b;    // Blue
-      pixel[1] = g;    // Green
-      pixel[2] = r;    // Red
-      pixel[3] = 255;  // Alpha
+  struct Hash {
+    std::size_t operator()(const TileKey& key) const {
+      return std::hash<int>()(key.z_) ^ std::hash<int>()(key.x_) ^ std::hash<int>()(key.y_);
+    }
+  };
+
+ private:
+  int z_;
+  int x_;
+  int y_;
+};
+
+class TileGenerator {
+ public:
+  TileGenerator(const std::vector<MatchedRoute>& matched_routes) {
+    for (const auto& matched_route : matched_routes) {
+      for (const auto& segment : matched_route.way_segments) {
+        auto it = traversal_counts_.find(segment.edge_id);
+        if (it == traversal_counts_.end()) {
+          traversal_counts_[segment.edge_id] = segment;
+        } else {
+          it->second.traversal_count += 1;
+        }
+      }
     }
   }
 
-  return png_data;
-}
+  Tile generateTile(int z, int x, int y) {
+    Tile tile(z, x, y);
+    tile.paint(traversal_counts_);
+    return tile;
+  }
+
+  Tile getTile(int z, int x, int y) {
+    TileKey key(z, x, y);
+    auto it = tile_cache_.find(key);
+    if (it != tile_cache_.end()) {
+      return it->second;
+    }
+
+    // Generate the tile
+    Tile tile = generateTile(z, x, y);
+
+    // Cache the generated tile
+    tile_cache_.emplace(key, tile);
+
+    return tile;
+  }
+
+ private:
+  std::unordered_map<TileKey, Tile, TileKey::Hash> tile_cache_;
+  std::unordered_map<std::size_t, WaySegment> traversal_counts_;
+};
 
 int main(int argc, char** argv) {
   // Create HTTP server
@@ -262,10 +377,33 @@ int main(int argc, char** argv) {
   fprintf(stderr, "Witx Heatmap Route Planner\n");
   auto routes = load_all_routes();
   RouteMatcher matcher;
+
+#if !RESTORE
+
   auto matched_routes = matcher.matchAllRoutes(routes);
+  nlohmann::json heatmap_json = matched_routes;
+  std::ofstream heatmap_file(HEATMAP_FILE);
+  if (!heatmap_file.is_open()) {
+    throw std::runtime_error("Failed to open heatmap file for writing: " HEATMAP_FILE);
+  }
+  heatmap_file << heatmap_json.dump(2);
+  heatmap_file.close();
+#else
+  std::ifstream heatmap_file(HEATMAP_FILE);
+  if (!heatmap_file.is_open()) {
+    throw std::runtime_error("Failed to open heatmap file for reading: " HEATMAP_FILE);
+  }
+  TimerLog restore_timer("Loading matched routes from heatmap.json");
+  nlohmann::json heatmap_json;
+  heatmap_file >> heatmap_json;
+  std::vector<MatchedRoute> matched_routes = heatmap_json.get<std::vector<MatchedRoute> >();
+  restore_timer.stop();
+#endif
+
+  TileGenerator tile_generator(matched_routes);
 
   // Main route planning endpoint
-  svr.Get(R"(/tiles/(\d+)/(\d+)/(\d+).png)", [&matched_routes](const httplib::Request& req, httplib::Response& res) {
+  svr.Get(R"(/tiles/(\d+)/(\d+)/(\d+).png)", [&tile_generator](const httplib::Request& req, httplib::Response& res) {
     // Heatmap XYZ tile request from url like /tiles/{z}/{x}/{y}.png
     for (const auto& param : req.path_params) {
       fprintf(stderr, "Path param: %s = %s\n", param.first.c_str(), param.second.c_str());
@@ -273,10 +411,11 @@ int main(int argc, char** argv) {
     int z = std::stoi(req.matches[1]);
     int x = std::stoi(req.matches[2]);
     int y = std::stoi(req.matches[3]);
-    fprintf(stderr, "Received tile request for z=%d, x=%d, y=%d\n", z, x, y);
+    // fprintf(stderr, "Received tile request for z=%d, x=%d, y=%d\n", z, x, y);
 
     // For now just return a placeholder PNG image (256x256 pixel)
-    cv::Mat png_data = generate_placeholder_tile(z, x, y);
+    Tile tile = tile_generator.getTile(z, x, y);
+    cv::Mat png_data = tile.getImage();
     std::vector<unsigned char> buffer;
     cv::imencode(".png", png_data, buffer);
     res.set_content(reinterpret_cast<const char*>(buffer.data()), buffer.size(), "image/png");
