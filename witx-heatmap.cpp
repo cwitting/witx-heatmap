@@ -81,6 +81,13 @@ std::pair<double, double> metersToLatLon(double x, double y) {
 
 // 1x1 km square tile which can be visited for coverage
 #define SQUADRAT_TILE_SIZE 1.0  // in km
+// EPSG:3857 (Web Mercator) inflates east-west/north-south distances by 1/cos(lat) away from the
+// equator, so a fixed-size square in projected meters isn't a real-world square everywhere.
+// Scale the tile size so it measures exactly SQUADRAT_TILE_SIZE km at the reference latitude below.
+#define SQUADRAT_REFERENCE_LATITUDE_DEG 55.6161  // Lejre, Denmark
+static const double SQUADRAT_TILE_SIZE_METERS =
+    SQUADRAT_TILE_SIZE * 1000.0 / std::cos(SQUADRAT_REFERENCE_LATITUDE_DEG * M_PI / 180.0);
+
 struct SquadratTile {
   int squadrat_x{};  // X index of the tile in the grid EPSG 3857
   int squadrat_y{};  // Y index of the tile in the grid EPSG 3857
@@ -93,16 +100,16 @@ struct SquadratTile {
   SquadratTile(double lat, double lon) {
     // Convert to EPSG 3857 meters
     auto [x, y] = latLonToMeters(lat, lon);
-    squadrat_x = static_cast<int>(std::floor(x / (SQUADRAT_TILE_SIZE * 1000.0)));
-    squadrat_y = static_cast<int>(std::floor(y / (SQUADRAT_TILE_SIZE * 1000.0)));
+    squadrat_x = static_cast<int>(std::floor(x / SQUADRAT_TILE_SIZE_METERS));
+    squadrat_y = static_cast<int>(std::floor(y / SQUADRAT_TILE_SIZE_METERS));
   }
 
   // Get the bounding box of the tile in lat/lon degrees
   std::pair<Coordinate, Coordinate> getBBox() const {
-    double min_x = squadrat_x * SQUADRAT_TILE_SIZE * 1000.0;
-    double min_y = squadrat_y * SQUADRAT_TILE_SIZE * 1000.0;
-    double max_x = (squadrat_x + 1) * SQUADRAT_TILE_SIZE * 1000.0;
-    double max_y = (squadrat_y + 1) * SQUADRAT_TILE_SIZE * 1000.0;
+    double min_x = squadrat_x * SQUADRAT_TILE_SIZE_METERS;
+    double min_y = squadrat_y * SQUADRAT_TILE_SIZE_METERS;
+    double max_x = (squadrat_x + 1) * SQUADRAT_TILE_SIZE_METERS;
+    double max_y = (squadrat_y + 1) * SQUADRAT_TILE_SIZE_METERS;
     auto [min_lat, min_lon] = metersToLatLon(min_x, min_y);
     auto [max_lat, max_lon] = metersToLatLon(max_x, max_y);
     return {Coordinate{min_lat, min_lon}, Coordinate{max_lat, max_lon}};
