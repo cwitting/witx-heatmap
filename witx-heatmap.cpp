@@ -12,6 +12,7 @@
 #include <fstream>
 #include <iostream>
 #include <memory>
+#include <mutex>
 #include <opencv2/core/mat.hpp>
 #include <opencv4/opencv2/opencv.hpp>
 #include <optional>
@@ -328,24 +329,33 @@ class TileGenerator {
 
   Tile getTile(int z, int x, int y) {
     TileKey key(z, x, y);
-    auto it = tile_cache_.find(key);
-    if (it != tile_cache_.end()) {
-      return it->second;
+    {
+      std::lock_guard<std::mutex> lock(cache_mutex_);
+      auto it = tile_cache_.find(key);
+      if (it != tile_cache_.end()) {
+        return it->second;
+      }
     }
 
     // Generate the tile
     Tile tile = generateTile(z, x, y);
 
     // Cache the generated tile
-    tile_cache_.emplace(key, tile);
+    {
+      std::lock_guard<std::mutex> lock(cache_mutex_);
+      tile_cache_.emplace(key, tile);
+    }
 
     return tile;
   }
 
  private:
+  static std::mutex cache_mutex_;
   std::unordered_map<TileKey, Tile, TileKey::Hash> tile_cache_;
   std::unordered_map<std::size_t, WaySegment> traversal_counts_;
 };
+
+std::mutex TileGenerator::cache_mutex_;
 
 int main(int argc, char** argv) {
   // Create HTTP server
