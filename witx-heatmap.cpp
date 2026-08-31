@@ -26,7 +26,7 @@
 #define ROUTE_FILE "/home/christian/git/witx-heatmap/data/christian_strava2.geojson"
 #define VALHALLA_CONFIG_FILE "/home/christian/git/witx-heatmap/data/routing/valhalla_data/valhalla.json"
 #define HEATMAP_FILE "/home/christian/git/witx-heatmap/data/heatmap.json"
-#define RESTORE 1
+#define RESTORE 0
 
 struct Coordinate {
   double lat{};
@@ -65,6 +65,51 @@ struct WaySegment {
 
 NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE(WaySegment, way_id, edge_id, geometry, traversal_count)
 
+std::pair<double, double> latLonToMeters(double lat, double lon) {
+  double x = lon * 20037508.34 / 180.0;
+  double y = std::log(std::tan((90.0 + lat) * M_PI / 360.0)) / (M_PI / 180.0);
+  y = y * 20037508.34 / 180.0;
+  return {x, y};
+}
+
+std::pair<double, double> metersToLatLon(double x, double y) {
+  double lon = (x / 20037508.34) * 180.0;
+  double lat = (y / 20037508.34) * 180.0;
+  lat = 180.0 / M_PI * (2.0 * std::atan(std::exp(lat * M_PI / 180.0)) - M_PI / 2.0);
+  return {lat, lon};
+}
+
+// 1x1 km square tile which can be visited for coverage
+#define SQUADRAT_TILE_SIZE 1.0  // in km
+struct SquadratTile {
+  int squadrat_x{};  // X index of the tile in the grid EPSG 3857
+  int squadrat_y{};  // Y index of the tile in the grid EPSG 3857
+
+  bool operator<(const SquadratTile& other) const {
+    return std::tie(squadrat_x, squadrat_y) < std::tie(other.squadrat_x, other.squadrat_y);
+  }
+
+  // Generate the tile from a point (lat, lon) in degrees
+  SquadratTile(double lat, double lon) {
+    // Convert to EPSG 3857 meters
+    auto [x, y] = latLonToMeters(lat, lon);
+    squadrat_x = static_cast<int>(std::floor(x / (SQUADRAT_TILE_SIZE * 1000.0)));
+    squadrat_y = static_cast<int>(std::floor(y / (SQUADRAT_TILE_SIZE * 1000.0)));
+  }
+
+  // Get the bounding box of the tile in lat/lon degrees
+  std::pair<Coordinate, Coordinate> getBBox() const {
+    double min_x = squadrat_x * SQUADRAT_TILE_SIZE * 1000.0;
+    double min_y = squadrat_y * SQUADRAT_TILE_SIZE * 1000.0;
+    double max_x = (squadrat_x + 1) * SQUADRAT_TILE_SIZE * 1000.0;
+    double max_y = (squadrat_y + 1) * SQUADRAT_TILE_SIZE * 1000.0;
+    auto [min_lat, min_lon] = metersToLatLon(min_x, min_y);
+    auto [max_lat, max_lon] = metersToLatLon(max_x, max_y);
+    return {Coordinate{min_lat, min_lon}, Coordinate{max_lat, max_lon}};
+  }
+};
+NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE(SquadratTile, squadrat_x, squadrat_y)
+
 class Tile {
  public:
   Tile(int z, int x, int y) : image_data_(256, 256, CV_8UC4, cv::Scalar(0, 0, 0, 0)), z_(z), x_(x), y_(y) {
@@ -94,10 +139,21 @@ class Tile {
         int x2 = static_cast<int>((p2.lon - min_lon_) / (max_lon_ - min_lon_) * 256);
         int y2 = static_cast<int>((max_lat_ - p2.lat) / (max_lat_ - min_lat_) * 256);
         int alpha = std::min(255, segment.traversal_count * 10 + 50);  // Adjust the multiplier for desired opacity
-        cv::line(image_data_, cv::Point(x1, y1), cv::Point(x2, y2), cv::Scalar(255, 0, 0, 255), 2);
+        cv::line(image_data_, cv::Point(x1, y1), cv::Point(x2, y2), cv::Scalar(255, 0, 0, 255), 2, cv::LINE_AA);
       }
     }
     // fprintf(stderr, "Painted %d way segments on tile z=%d, x=%d, y=%d\n", count, z_, x_, y_);
+  }
+
+  void paint(const std::vector<SquadratTile>& squadrat_tiles) {
+    for (const auto& tile : squadrat_tiles) {
+      auto [min_coord, max_coord] = tile.getBBox();
+      int x1 = static_cast<int>((min_coord.lon - min_lon_) / (max_lon_ - min_lon_) * 256);
+      int y1 = static_cast<int>((max_lat_ - max_coord.lat) / (max_lat_ - min_lat_) * 256);
+      int x2 = static_cast<int>((max_coord.lon - min_lon_) / (max_lon_ - min_lon_) * 256);
+      int y2 = static_cast<int>((max_lat_ - min_coord.lat) / (max_lat_ - min_lat_) * 256);
+      cv::rectangle(image_data_, cv::Point(x1, y1), cv::Point(x2, y2), cv::Scalar(0, 255, 0, 100), cv::FILLED);
+    }
   }
 
   cv::Mat getImage() const { return image_data_; }
@@ -125,9 +181,10 @@ class Tile {
 struct MatchedRoute {
   Route route;
   std::vector<WaySegment> way_segments;
+  std::set<SquadratTile> squadrat_tiles;
 };
 
-NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE(MatchedRoute, route, way_segments)
+NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE(MatchedRoute, route, way_segments, squadrat_tiles)
 
 std::vector<Route> load_all_routes() {
   std::vector<Route> routes;
@@ -208,6 +265,10 @@ class RouteMatcher {
 
     MatchedRoute matched_route;
     matched_route.route = route;
+
+    for (const auto& coord : route) {
+      matched_route.squadrat_tiles.emplace(coord.lat, coord.lon);
+    }
 
     // For each traversed edge, slice out the sub-range of the leg shape it covers so we
     // know exactly which part of the way (not just which way) was used.
@@ -319,6 +380,10 @@ class TileGenerator {
  public:
   TileGenerator(const std::vector<MatchedRoute>& matched_routes) {
     for (const auto& matched_route : matched_routes) {
+      for (const auto& tile : matched_route.squadrat_tiles) {
+        squadrat_tiles_.push_back(tile);
+      }
+
       for (const auto& segment : matched_route.way_segments) {
         auto it = traversal_counts_.find(segment.edge_id);
         if (it == traversal_counts_.end()) {
@@ -332,7 +397,8 @@ class TileGenerator {
 
   Tile generateTile(int z, int x, int y) {
     Tile tile(z, x, y);
-    tile.paint(traversal_counts_);
+    // tile.paint(traversal_counts_);
+    tile.paint(squadrat_tiles_);
     return tile;
   }
 
@@ -362,6 +428,7 @@ class TileGenerator {
   static std::mutex cache_mutex_;
   std::unordered_map<TileKey, Tile, TileKey::Hash> tile_cache_;
   std::unordered_map<std::size_t, WaySegment> traversal_counts_;
+  std::vector<SquadratTile> squadrat_tiles_;
 };
 
 std::mutex TileGenerator::cache_mutex_;
