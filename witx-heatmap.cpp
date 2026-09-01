@@ -42,15 +42,10 @@ using Route = std::vector<Coordinate>;
 
 struct WaySegment {
   std::string way_id;
-  uint64_t edge_id{};              // Valhalla's internal directed-edge id: differs between the two
-                                   // directions of the same physical segment, so it can't be used to
-                                   // pair up forward/backward traversal counts of the same segment
-  uint64_t begin_node_id{};        // OSM node id at one end of the segment (order-independent with end_node_id)
-  uint64_t end_node_id{};          // OSM node id at the other end of the segment
-  Route geometry;                  // The portion of the way's geometry actually traversed by the route,
-                                   // ordered in the direction of travel
-  int traversal_count_forward{};   // How many times this way-segment was traversed across all matched routes
-  int traversal_count_backward{};  // How many times this way-segment was traversed across all matched routes
+  uint64_t edge_id{};     // Valhalla's internal directed-edge id: stable identity for the exact
+                          // maximal way-segment traversed, safe to use as a traversal-count key
+  Route geometry;         // The portion of the way's geometry actually traversed by the route
+  int traversal_count{};  // How many times this way-segment was traversed across all matched routes
 
   bool inBBox(double min_lat, double min_lon, double max_lat, double max_lon) const {
     for (int i = 0; i < geometry.size(); ++i) {
@@ -71,27 +66,7 @@ struct WaySegment {
   }
 };
 
-NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE(WaySegment, way_id, edge_id, begin_node_id, end_node_id, geometry,
-                                   traversal_count_forward, traversal_count_backward)
-
-// Direction-independent identity for a physical way-segment: the same two endpoint nodes are shared by
-// the forward and backward directed edges, so sorting them merges both directions into one key.
-struct UndirectedSegmentKey {
-  uint64_t node_a{};
-  uint64_t node_b{};
-
-  explicit UndirectedSegmentKey(const WaySegment& segment)
-      : node_a(std::min(segment.begin_node_id, segment.end_node_id))
-      , node_b(std::max(segment.begin_node_id, segment.end_node_id)) {}
-
-  bool operator==(const UndirectedSegmentKey& other) const { return node_a == other.node_a && node_b == other.node_b; }
-
-  struct Hash {
-    std::size_t operator()(const UndirectedSegmentKey& key) const {
-      return std::hash<uint64_t>()(key.node_a) ^ (std::hash<uint64_t>()(key.node_b) << 1);
-    }
-  };
-};
+NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE(WaySegment, way_id, edge_id, geometry, traversal_count)
 
 std::pair<double, double> latLonToMeters(double lat, double lon) {
   double x = lon * 20037508.34 / 180.0;
@@ -313,16 +288,7 @@ class Tile {
     //         min_lat_, max_lat_, min_lon_, max_lon_);
   }
 
-  cv::Scalar percentToColorJetHeatmap(double percent) {
-    percent = std::clamp(percent, 0.0, 1.0);
-    int r = static_cast<int>(std::round(255 * std::min(std::max(1.5 - 4 * std::abs(percent - 0.75), 0.0), 1.0)));
-    int g = static_cast<int>(std::round(255 * std::min(std::max(1.5 - 4 * std::abs(percent - 0.5), 0.0), 1.0)));
-    int b = static_cast<int>(std::round(255 * std::min(std::max(1.5 - 4 * std::abs(percent - 0.25), 0.0), 1.0)));
-    return cv::Scalar(b, g, r, 255);
-  }
-
-  void paintMatches(
-      const std::unordered_map<UndirectedSegmentKey, WaySegment, UndirectedSegmentKey::Hash>& way_segments) {
+  void paintMatches(const std::unordered_map<std::size_t, WaySegment>& way_segments) {
     int count = 0;
     for (const auto& [key, segment] : way_segments) {
       if (!segment.inBBox(min_lat_, min_lon_, max_lat_, max_lon_)) {
@@ -339,13 +305,8 @@ class Tile {
         int y1 = static_cast<int>((max_lat_ - p1.lat) / (max_lat_ - min_lat_) * 256);
         int x2 = static_cast<int>((p2.lon - min_lon_) / (max_lon_ - min_lon_) * 256);
         int y2 = static_cast<int>((max_lat_ - p2.lat) / (max_lat_ - min_lat_) * 256);
-        int total_traversals = segment.traversal_count_forward + segment.traversal_count_backward;
-        if (total_traversals <= 5) {
-          continue;
-        }
-        double traversal_ratio = static_cast<double>(segment.traversal_count_forward) / total_traversals;
-        cv::line(image_data_, cv::Point(x1, y1), cv::Point(x2, y2), percentToColorJetHeatmap(traversal_ratio), 2,
-                 cv::LINE_AA);
+        int alpha = std::min(255, segment.traversal_count * 10 + 50);  // Adjust the multiplier for desired opacity
+        cv::line(image_data_, cv::Point(x1, y1), cv::Point(x2, y2), cv::Scalar(255, 0, 0, 255), 2, cv::LINE_AA);
       }
     }
     // fprintf(stderr, "Painted %d way segments on tile z=%d, x=%d, y=%d\n", count, z_, x_, y_);
@@ -542,30 +503,7 @@ class RouteMatcher {
           size_t begin = std::min<size_t>(edge.begin_shape_index(), leg_shape.size() - 1);
           size_t end = std::min<size_t>(edge.end_shape_index(), leg_shape.size() - 1);
           Route geometry(leg_shape.begin() + begin, leg_shape.begin() + end + 1);
-
-          WaySegment segment;
-          segment.way_id = std::to_string(edge.way_id());
-          segment.edge_id = edge.id();
-          if (edge.has_begin_osm_node_id()) {
-            segment.begin_node_id = edge.begin_osm_node_id();
-          } else {
-            fprintf(stderr, "Warning: edge %llu has no begin_osm_node_id\n",
-                    static_cast<unsigned long long>(edge.id()));
-          }
-          if (edge.has_end_osm_node_id()) {
-            segment.end_node_id = edge.end_osm_node_id();
-          } else {
-            fprintf(stderr, "Warning: edge %llu has no end_osm_node_id\n", static_cast<unsigned long long>(edge.id()));
-          }
-          if (edge.forward()) {
-            segment.traversal_count_forward = 1;
-            segment.traversal_count_backward = 0;
-          } else {
-            segment.traversal_count_forward = 0;
-            segment.traversal_count_backward = 1;
-          }
-          segment.geometry = std::move(geometry);
-          matched_route.way_segments.push_back(std::move(segment));
+          matched_route.way_segments.push_back({std::to_string(edge.way_id()), edge.id(), std::move(geometry)});
         }
       }
     }
@@ -588,9 +526,9 @@ class RouteMatcher {
       }
       matched_routes.push_back(*matched_route);
       matched_count++;
-      if (matched_count >= 500) {
-        break;
-      }
+      // if (matched_count >= 300) {
+      //   break;
+      // }
     }
     return matched_routes;
   }
@@ -666,13 +604,11 @@ class TileGenerator {
       squadrat_tiles_.insert(matched_route.squadrat_tiles.begin(), matched_route.squadrat_tiles.end());
 
       for (const auto& segment : matched_route.way_segments) {
-        UndirectedSegmentKey key(segment);
-        auto it = traversal_counts_.find(key);
+        auto it = traversal_counts_.find(segment.edge_id);
         if (it == traversal_counts_.end()) {
-          traversal_counts_[key] = segment;
+          traversal_counts_[segment.edge_id] = segment;
         } else {
-          it->second.traversal_count_forward += segment.traversal_count_forward;
-          it->second.traversal_count_backward += segment.traversal_count_backward;
+          it->second.traversal_count += 1;
         }
       }
     }
@@ -680,10 +616,10 @@ class TileGenerator {
 
   Tile generateTile(int z, int x, int y) {
     Tile tile(z, x, y);
-    tile.paintMatches(traversal_counts_);
+    // tile.paint(traversal_counts_);
     // tile.paintGrid();
     // tile.paint(squadrat_tiles_);
-    // tile.paint(alpha_shape_);
+    tile.paint(alpha_shape_);
     return tile;
   }
 
@@ -712,7 +648,7 @@ class TileGenerator {
  private:
   static std::mutex cache_mutex_;
   std::unordered_map<TileKey, Tile, TileKey::Hash> tile_cache_;
-  std::unordered_map<UndirectedSegmentKey, WaySegment, UndirectedSegmentKey::Hash> traversal_counts_;
+  std::unordered_map<std::size_t, WaySegment> traversal_counts_;
   std::vector<MatchedRoute> matched_routes_;
   AlphaShape alpha_shape_;
   std::set<SquadratTile> squadrat_tiles_;
