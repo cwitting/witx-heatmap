@@ -610,30 +610,7 @@ class TileKey {
 
 class TileGenerator {
  public:
-  TileGenerator(const std::vector<MatchedRoute>& matched_routes)
-      : matched_routes_(matched_routes), alpha_shape_(matched_routes, 7000) {
-    for (const auto& matched_route : matched_routes) {
-      squadrat_tiles_.insert(matched_route.squadrat_tiles.begin(), matched_route.squadrat_tiles.end());
-
-      for (const auto& segment : matched_route.way_segments) {
-        auto it = traversal_counts_.find(segment.edge_id);
-        if (it == traversal_counts_.end()) {
-          traversal_counts_[segment.edge_id] = segment;
-        } else {
-          it->second.traversal_count += 1;
-        }
-      }
-    }
-  }
-
-  Tile generateTile(int z, int x, int y) {
-    Tile tile(z, x, y);
-    // tile.paint(traversal_counts_);
-    // tile.paintGrid();
-    // tile.paint(squadrat_tiles_);
-    tile.paint(alpha_shape_);
-    return tile;
-  }
+  virtual Tile generateTile(int z, int x, int y) = 0;
 
   Tile getTile(int z, int x, int y) {
     TileKey key(z, x, y);
@@ -658,15 +635,68 @@ class TileGenerator {
   }
 
  private:
-  static std::mutex cache_mutex_;
+  std::mutex cache_mutex_;
   std::unordered_map<TileKey, Tile, TileKey::Hash> tile_cache_;
-  std::unordered_map<std::size_t, WaySegment> traversal_counts_;
-  std::vector<MatchedRoute> matched_routes_;
+};
+
+class AlphaShapeTileGenerator : public TileGenerator {
+ public:
+  AlphaShapeTileGenerator(const std::vector<MatchedRoute>& matched_routes, double alpha)
+      : alpha_shape_(matched_routes, alpha) {}
+
+  Tile generateTile(int z, int x, int y) override {
+    Tile tile(z, x, y);
+    tile.paint(alpha_shape_);
+    return tile;
+  }
+
+ private:
   AlphaShape alpha_shape_;
+};
+
+class SquadratTileGenerator : public TileGenerator {
+ public:
+  SquadratTileGenerator(const std::vector<MatchedRoute>& matched_routes, double size) {
+    for (const auto& matched_route : matched_routes) {
+      squadrat_tiles_.insert(matched_route.squadrat_tiles.begin(), matched_route.squadrat_tiles.end());
+    }
+  }
+
+  Tile generateTile(int z, int x, int y) override {
+    Tile tile(z, x, y);
+    tile.paintGrid();
+    tile.paint(squadrat_tiles_);
+    return tile;
+  }
+
+ private:
   std::set<SquadratTile> squadrat_tiles_;
 };
 
-std::mutex TileGenerator::cache_mutex_;
+class TraversalTileGenerator : public TileGenerator {
+ public:
+  TraversalTileGenerator(const std::vector<MatchedRoute>& matched_routes) {
+    for (const auto& matched_route : matched_routes) {
+      for (const auto& segment : matched_route.way_segments) {
+        auto it = traversal_counts_.find(segment.edge_id);
+        if (it == traversal_counts_.end()) {
+          traversal_counts_[segment.edge_id] = segment;
+        } else {
+          it->second.traversal_count += 1;
+        }
+      }
+    }
+  }
+
+  Tile generateTile(int z, int x, int y) override {
+    Tile tile(z, x, y);
+    tile.paintMatches(traversal_counts_);
+    return tile;
+  }
+
+ private:
+  std::unordered_map<std::size_t, WaySegment> traversal_counts_;
+};
 
 int main(int argc, char** argv) {
   // Create HTTP server
@@ -720,10 +750,24 @@ int main(int argc, char** argv) {
   restore_timer.stop();
 #endif
 
-  TileGenerator tile_generator(matched_routes);
+  std::unordered_map<int, std::unique_ptr<AlphaShapeTileGenerator>> alpha_shapes;
+  {
+    TimerLog alpha_shapes_timer("Generating alpha shapes for radius 4000");
+    alpha_shapes.emplace(4000, std::make_unique<AlphaShapeTileGenerator>(matched_routes, static_cast<double>(4000)));
+  }
+  {
+    TimerLog alpha_shapes_timer("Generating alpha shapes for radius 7000");
+    alpha_shapes.emplace(7000, std::make_unique<AlphaShapeTileGenerator>(matched_routes, static_cast<double>(7000)));
+  }
+  {
+    TimerLog alpha_shapes_timer("Generating alpha shapes for radius 10000");
+    alpha_shapes.emplace(10000, std::make_unique<AlphaShapeTileGenerator>(matched_routes, static_cast<double>(10000)));
+  }
+  std::mutex alpha_shapes_mutex;
 
   // Main route planning endpoint
-  svr.Get(R"(/tiles/(\d+)/(\d+)/(\d+).png)", [&tile_generator](const httplib::Request& req, httplib::Response& res) {
+  svr.Get(R"(/coverage/(\d+)/(\d+)/(\d+).png)", [&matched_routes, &alpha_shapes, &alpha_shapes_mutex](
+                                                    const httplib::Request& req, httplib::Response& res) {
     // Heatmap XYZ tile request from url like /tiles/{z}/{x}/{y}.png
     for (const auto& param : req.path_params) {
       fprintf(stderr, "Path param: %s = %s\n", param.first.c_str(), param.second.c_str());
@@ -731,10 +775,62 @@ int main(int argc, char** argv) {
     int z = std::stoi(req.matches[1]);
     int x = std::stoi(req.matches[2]);
     int y = std::stoi(req.matches[3]);
+    std::string user = req.has_param("user") ? req.get_param_value("user") : "";
+    int radius = req.has_param("radius") ? std::stoi(req.get_param_value("radius")) : 0;
     // fprintf(stderr, "Received tile request for z=%d, x=%d, y=%d\n", z, x, y);
 
     // For now just return a placeholder PNG image (256x256 pixel)
-    Tile tile = tile_generator.getTile(z, x, y);
+    auto it = alpha_shapes.find(radius);
+    if (it == alpha_shapes.end()) {
+      std::lock_guard<std::mutex> lock(alpha_shapes_mutex);
+      it = alpha_shapes
+               .emplace(radius, std::make_unique<AlphaShapeTileGenerator>(matched_routes, static_cast<double>(radius)))
+               .first;
+    }
+    Tile tile = it->second->getTile(z, x, y);
+    cv::Mat png_data = tile.getImage();
+    std::vector<unsigned char> buffer;
+    cv::imencode(".png", png_data, buffer);
+    res.set_content(reinterpret_cast<const char*>(buffer.data()), buffer.size(), "image/png");
+  });
+
+  std::unordered_map<int, std::unique_ptr<SquadratTileGenerator>> squadrat_tiles;
+  {
+    TimerLog squadrat_tiles_timer("Generating alpha shapes for radius 4000");
+    squadrat_tiles.emplace(4000, std::make_unique<SquadratTileGenerator>(matched_routes, static_cast<double>(1000)));
+  }
+  {
+    TimerLog squadrat_tiles_timer("Generating alpha shapes for radius 7000");
+    squadrat_tiles.emplace(7000, std::make_unique<SquadratTileGenerator>(matched_routes, static_cast<double>(2500)));
+  }
+  {
+    TimerLog squadrat_tiles_timer("Generating alpha shapes for radius 10000");
+    squadrat_tiles.emplace(10000, std::make_unique<SquadratTileGenerator>(matched_routes, static_cast<double>(5000)));
+  }
+  std::mutex squadrat_tiles_mutex;
+
+  svr.Get(R"(/squadrat/(\d+)/(\d+)/(\d+).png)", [&matched_routes, &squadrat_tiles, &squadrat_tiles_mutex](
+                                                    const httplib::Request& req, httplib::Response& res) {
+    // Heatmap XYZ tile request from url like /tiles/{z}/{x}/{y}.png
+    for (const auto& param : req.path_params) {
+      fprintf(stderr, "Path param: %s = %s\n", param.first.c_str(), param.second.c_str());
+    }
+    int z = std::stoi(req.matches[1]);
+    int x = std::stoi(req.matches[2]);
+    int y = std::stoi(req.matches[3]);
+    std::string user = req.has_param("user") ? req.get_param_value("user") : "";
+    int radius = req.has_param("radius") ? std::stoi(req.get_param_value("radius")) : 0;
+    // fprintf(stderr, "Received tile request for z=%d, x=%d, y=%d\n", z, x, y);
+
+    // For now just return a placeholder PNG image (256x256 pixel)
+    auto it = squadrat_tiles.find(radius);
+    if (it == squadrat_tiles.end()) {
+      std::lock_guard<std::mutex> lock(squadrat_tiles_mutex);
+      it = squadrat_tiles
+               .emplace(radius, std::make_unique<SquadratTileGenerator>(matched_routes, static_cast<double>(radius)))
+               .first;
+    }
+    Tile tile = it->second->getTile(z, x, y);
     cv::Mat png_data = tile.getImage();
     std::vector<unsigned char> buffer;
     cv::imencode(".png", png_data, buffer);
