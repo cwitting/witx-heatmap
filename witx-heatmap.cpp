@@ -830,7 +830,7 @@ int main(int argc, char** argv) {
   {
     TimerLog squadrat_tiles_timer("Generating squadrats for radius 7000");
     squadrat_tile_generators.emplace(
-        7000, std::make_unique<SquadratTileGenerator>(matched_routes, static_cast<double>(2500)));
+        1600, std::make_unique<SquadratTileGenerator>(matched_routes, static_cast<double>(1600)));
   }
   {
     TimerLog squadrat_tiles_timer("Generating squadrats for radius 10000");
