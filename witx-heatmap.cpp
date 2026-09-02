@@ -496,7 +496,7 @@ class RouteMatcher {
   }
 
   // Match routes to the road network using Valhalla's trace_route (map matching)
-  std::optional<MatchedRoute> matchRoute(const Route& route) {
+  MatchedRoute matchRoute(const Route& route) {
     nlohmann::json request;
     request["costing"] = "pedestrian";
     request["shape_match"] = "map_snap";
@@ -505,20 +505,20 @@ class RouteMatcher {
       request["shape"].push_back({{"lat", coord.lat}, {"lon", coord.lon}});
     }
 
+    MatchedRoute matched_route;
+    matched_route.route = route;
+
     valhalla::Api api;
     std::string json_str;
     try {
       json_str = actor_->trace_route(request.dump(), nullptr, &api);
     } catch (const std::exception& e) {
       fprintf(stderr, "Valhalla trace_route failed: %s\n", e.what());
-      return std::nullopt;
+      return matched_route;
     }
 
     // print the raw json result to stderr
     // fprintf(stderr, "Valhalla trace_route result: %s\n", json_str.c_str());
-
-    MatchedRoute matched_route;
-    matched_route.route = route;
 
     // For each traversed edge, slice out the sub-range of the leg shape it covers so we
     // know exactly which part of the way (not just which way) was used.
@@ -552,11 +552,10 @@ class RouteMatcher {
                      "/" + std::to_string(routes.size()));
       auto matched_route = matchRoute(route);
       total_count++;
-      if (!matched_route) {
+      if (matched_route.way_segments.empty()) {
         fprintf(stderr, "Route matching failed for: %s, %s\n", route.name.c_str(), route.link.c_str());
-        continue;
       }
-      matched_routes.push_back(*matched_route);
+      matched_routes.push_back(std::move(matched_route));
       matched_count++;
       // if (matched_count >= 300) {
       //   break;
