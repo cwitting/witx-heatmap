@@ -615,7 +615,9 @@ class TileKey {
   TileKey(int z, int x, int y) : z_(z), x_(x), y_(y) {
   }
 
-  bool operator==(const TileKey& other) const { return z_ == other.z_ && x_ == other.x_ && y_ == other.y_; }
+  bool operator==(const TileKey& other) const {
+    return z_ == other.z_ && x_ == other.x_ && y_ == other.y_;
+  }
 
   struct Hash {
     std::size_t operator()(const TileKey& key) const {
