@@ -53,3 +53,6 @@ Language: Cpp
 ColumnLimit: 120
 
 BreakConstructorInitializersBeforeComma: true
+
+AllowShortBlocksOnASingleLine: Never
+AllowShortFunctionsOnASingleLine: None

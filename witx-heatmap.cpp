@@ -186,7 +186,9 @@ class AlphaShape {
     compute();
   }
 
-  const std::vector<std::pair<Coordinate, Coordinate>>& getBoundaryEdges() const { return boundary_edges_; }
+  const std::vector<std::pair<Coordinate, Coordinate>>& getBoundaryEdges() const {
+    return boundary_edges_;
+  }
 
   void compute() {
     boundary_edges_.clear();
@@ -263,7 +265,9 @@ class AlphaShape {
     }
   }
 
-  const std::vector<MatchedRoute>& getMatchedRoutes() const { return matched_routes_; }
+  const std::vector<MatchedRoute>& getMatchedRoutes() const {
+    return matched_routes_;
+  }
 
  private:
   // Circumradius of triangle (a, b, c); returns +inf for degenerate (near-zero-area) triangles.
@@ -392,16 +396,32 @@ class Tile {
     }
   }
 
-  cv::Mat getImage() const { return image_data_; }
+  cv::Mat getImage() const {
+    return image_data_;
+  }
 
-  int getZ() const { return z_; }
-  int getX() const { return x_; }
-  int getY() const { return y_; }
+  int getZ() const {
+    return z_;
+  }
+  int getX() const {
+    return x_;
+  }
+  int getY() const {
+    return y_;
+  }
 
-  double minLon() const { return min_lon_; }
-  double maxLon() const { return max_lon_; }
-  double minLat() const { return min_lat_; }
-  double maxLat() const { return max_lat_; }
+  double minLon() const {
+    return min_lon_;
+  }
+  double maxLon() const {
+    return max_lon_;
+  }
+  double minLat() const {
+    return min_lat_;
+  }
+  double maxLat() const {
+    return max_lat_;
+  }
 
  private:
   cv::Mat image_data_;
@@ -446,9 +466,12 @@ std::vector<Route> load_all_routes() {
 // Using chrono timer
 class TimerLog {
  public:
-  TimerLog(const std::string& name) : name_(name), start_(std::chrono::high_resolution_clock::now()) {}
+  TimerLog(const std::string& name) : name_(name), start_(std::chrono::high_resolution_clock::now()) {
+  }
 
-  ~TimerLog() { stop(); }
+  ~TimerLog() {
+    stop();
+  }
 
   void stop() {
     auto end = std::chrono::high_resolution_clock::now();
@@ -592,7 +615,8 @@ class RouteMatcher {
 
 class TileKey {
  public:
-  TileKey(int z, int x, int y) : z_(z), x_(x), y_(y) {}
+  TileKey(int z, int x, int y) : z_(z), x_(x), y_(y) {
+  }
 
   bool operator==(const TileKey& other) const { return z_ == other.z_ && x_ == other.x_ && y_ == other.y_; }
 
@@ -642,7 +666,8 @@ class TileGenerator {
 class AlphaShapeTileGenerator : public TileGenerator {
  public:
   AlphaShapeTileGenerator(const std::vector<MatchedRoute>& matched_routes, double alpha)
-      : alpha_shape_(matched_routes, alpha) {}
+      : alpha_shape_(matched_routes, alpha) {
+  }
 
   Tile generateTile(int z, int x, int y) override {
     Tile tile(z, x, y);
