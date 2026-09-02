@@ -133,17 +133,20 @@ cv::Scalar color_map(double value, std::vector<cv::Scalar> colors) {
 }
 
 constexpr double MILLISECONDS_PER_DAY = 24 * 60 * 60 * 1000;
+constexpr double HEX_SQRT3 = 1.7320508075688772;
 
+// 1x1 km hexagonal tile which can be visited for coverage. Uses "pointy-top" axial coordinates
+// (q, r), see https://www.redblobgames.com/grids/hexagons/ for the underlying math.
 struct SquadratTile {
-  int squadrat_x{};    // X index of the tile in the grid EPSG 3857
-  int squadrat_y{};    // Y index of the tile in the grid EPSG 3857
-  double tile_size{};  // Size of the tile in corrected meters
+  int squadrat_q{};    // Axial q index of the hexagon in the grid EPSG 3857
+  int squadrat_r{};    // Axial r index of the hexagon in the grid EPSG 3857
+  double tile_size{};  // Circumradius (center to corner) of the hexagon in corrected meters
   mutable double first_visit_time{};
   mutable double last_visit_time{};
   static double all_last_visit_time;
 
   bool operator<(const SquadratTile& other) const {
-    return std::tie(squadrat_x, squadrat_y) < std::tie(other.squadrat_x, other.squadrat_y);
+    return std::tie(squadrat_q, squadrat_r) < std::tie(other.squadrat_q, other.squadrat_r);
   }
 
   SquadratTile() = default;  // needed for JSON deserialization
@@ -152,8 +155,9 @@ struct SquadratTile {
   SquadratTile(double lat, double lon, double tile_size) {
     // Convert to EPSG 3857 meters
     auto [x, y] = latLonToMeters(lat, lon);
-    squadrat_x = static_cast<int>(std::floor(x / tile_size));
-    squadrat_y = static_cast<int>(std::floor(y / tile_size));
+    double qf = (HEX_SQRT3 / 3.0 * x - y / 3.0) / tile_size;
+    double rf = (2.0 / 3.0 * y) / tile_size;
+    cubeRound(qf, rf, squadrat_q, squadrat_r);
     this->tile_size = tile_size;
   }
 
@@ -198,21 +202,54 @@ struct SquadratTile {
     return color_map(age, default_colors);
   }
 
-  // Get the bounding box of the tile in lat/lon degrees
-  std::pair<Coordinate, Coordinate> getBBox() const {
-    double min_x = squadrat_x * tile_size;
-    double min_y = squadrat_y * tile_size;
-    double max_x = (squadrat_x + 1) * tile_size;
-    double max_y = (squadrat_y + 1) * tile_size;
-    auto [min_lat, min_lon] = metersToLatLon(min_x, min_y);
-    auto [max_lat, max_lon] = metersToLatLon(max_x, max_y);
-    return {Coordinate{min_lat, min_lon}, Coordinate{max_lat, max_lon}};
+  // Get the 6 corners of the hexagon in lat/lon degrees
+  std::vector<Coordinate> getVertices() const {
+    return hexVertices(squadrat_q, squadrat_r, tile_size);
+  }
+
+  // Axial (q, r) hex center, in the same corrected EPSG 3857 meters as tile_size
+  static std::pair<double, double> hexCenter(int q, int r, double tile_size) {
+    double x = tile_size * (HEX_SQRT3 * q + HEX_SQRT3 / 2.0 * r);
+    double y = tile_size * 1.5 * r;
+    return {x, y};
+  }
+
+  static std::vector<Coordinate> hexVertices(int q, int r, double tile_size) {
+    auto [cx, cy] = hexCenter(q, r, tile_size);
+    std::vector<Coordinate> vertices;
+    vertices.reserve(6);
+    for (int i = 0; i < 6; ++i) {
+      double angle = M_PI / 180.0 * (60.0 * i - 30.0);
+      auto [lat, lon] = metersToLatLon(cx + tile_size * std::cos(angle), cy + tile_size * std::sin(angle));
+      vertices.push_back(Coordinate{lat, lon});
+    }
+    return vertices;
+  }
+
+ private:
+  // Round fractional cube coordinates (qf, rf, -qf-rf) to the nearest hex, fixing up whichever
+  // component has the largest rounding error so q+r+s stays exactly zero.
+  static void cubeRound(double qf, double rf, int& q, int& r) {
+    double sf = -qf - rf;
+    double q_round = std::round(qf);
+    double r_round = std::round(rf);
+    double s_round = std::round(sf);
+    double q_diff = std::abs(q_round - qf);
+    double r_diff = std::abs(r_round - rf);
+    double s_diff = std::abs(s_round - sf);
+    if (q_diff > r_diff && q_diff > s_diff) {
+      q_round = -r_round - s_round;
+    } else if (r_diff > s_diff) {
+      r_round = -q_round - s_round;
+    }
+    q = static_cast<int>(q_round);
+    r = static_cast<int>(r_round);
   }
 };
 
 double SquadratTile::all_last_visit_time = 0;
 
-NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE(SquadratTile, squadrat_x, squadrat_y, tile_size, first_visit_time, last_visit_time,
+NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE(SquadratTile, squadrat_q, squadrat_r, tile_size, first_visit_time, last_visit_time,
                                    all_last_visit_time)
 
 struct MatchedRoute {
@@ -433,7 +470,7 @@ class Tile {
     // fprintf(stderr, "Painted %d way segments on tile z=%d, x=%d, y=%d\n", count, z_, x_, y_);
   }
 
-  // Draw the full squadrat grid (every 1km line), regardless of which tiles were visited
+  // Draw the full squadrat hex grid, regardless of which tiles were visited
   void paintGrid(double tile_size) {
     if (z_ < 11) {
       return;  // Only draw grid for zoom levels 11 and above
@@ -442,40 +479,24 @@ class Tile {
     if (z_ >= 14) {
       alpha = 200;  // Make grid lines more visible at higher zoom levels
     }
-    auto [min_x, min_y] = latLonToMeters(min_lat_, min_lon_);
-    auto [max_x, max_y] = latLonToMeters(max_lat_, max_lon_);
-
-    long long x_start = static_cast<long long>(std::floor(min_x / tile_size));
-    long long x_end = static_cast<long long>(std::ceil(max_x / tile_size));
     cv::Scalar grey(20, 20, 20, alpha);
-    for (long long i = x_start; i <= x_end; ++i) {
-      auto [lat, lon] = metersToLatLon(i * tile_size, 0.0);
-      int px = static_cast<int>((lon - min_lon_) / (max_lon_ - min_lon_) * 256);
-      cv::line(image_data_, cv::Point(px, 0), cv::Point(px, 256), grey, 1, cv::LINE_AA);
-    }
-
-    long long y_start = static_cast<long long>(std::floor(min_y / tile_size));
-    long long y_end = static_cast<long long>(std::ceil(max_y / tile_size));
-    for (long long j = y_start; j <= y_end; ++j) {
-      auto [lat, lon] = metersToLatLon(0.0, j * tile_size);
-      int py = static_cast<int>((max_lat_ - lat) / (max_lat_ - min_lat_) * 256);
-      cv::line(image_data_, cv::Point(0, py), cv::Point(256, py), grey, 1, cv::LINE_AA);
+    for (const auto& [q, r] : hexesOverlappingTile(tile_size)) {
+      auto polygon = hexToPixelPolygon(SquadratTile::hexVertices(q, r, tile_size));
+      cv::polylines(image_data_, polygon, /*isClosed=*/true, grey, 1, cv::LINE_AA);
     }
   }
 
   void paint(const std::set<SquadratTile>& squadrat_tiles) {
     for (const auto& tile : squadrat_tiles) {
-      auto [min_coord, max_coord] = tile.getBBox();
-      int x1 = static_cast<int>((min_coord.lon - min_lon_) / (max_lon_ - min_lon_) * 256);
-      int y1 = static_cast<int>((max_lat_ - max_coord.lat) / (max_lat_ - min_lat_) * 256);
-      int x2 = static_cast<int>((max_coord.lon - min_lon_) / (max_lon_ - min_lon_) * 256);
-      int y2 = static_cast<int>((max_lat_ - min_coord.lat) / (max_lat_ - min_lat_) * 256);
-      cv::rectangle(image_data_, cv::Point(x1, y1), cv::Point(x2, y2), tile.getLastVisitColor(), cv::FILLED);
-      // Print the age in the center
-      cv::Point center((x1 + x2) / 2, (y1 + y2) / 2);
-      // Offset for text placement exactly in the center
-      center.x -= 10;  // Adjust the horizontal position of the text to be centered
-      center.y += 5;   // Adjust the vertical position of the text to be centered
+      auto polygon = hexToPixelPolygon(tile.getVertices());
+      cv::fillConvexPoly(image_data_, polygon, tile.getLastVisitColor(), cv::LINE_AA);
+      // Print the age at the hex's centroid
+      cv::Point center(0, 0);
+      for (const auto& p : polygon) {
+        center += p;
+      }
+      center.x = center.x / static_cast<int>(polygon.size()) - 10;  // Center + shift text to be centered
+      center.y = center.y / static_cast<int>(polygon.size()) + 5;
       if (z_ >= 11) {
         cv::putText(image_data_, std::to_string((int)tile.getLastVisitAge()) + "d", center, cv::FONT_HERSHEY_SIMPLEX,
                     0.4, cv::Scalar(0, 0, 0, 255), 1, cv::LINE_AA);
@@ -484,7 +505,7 @@ class Tile {
   }
 
   void paint(const AlphaShape& alpha_shape) {
-    paintRoute(alpha_shape.getMatchedRoutes());
+    // paintRoute(alpha_shape.getMatchedRoutes());
     for (const auto& [p1, p2] : alpha_shape.getBoundaryEdges()) {
       int x1 = static_cast<int>((p1.lon - min_lon_) / (max_lon_ - min_lon_) * 256);
       int y1 = static_cast<int>((max_lat_ - p1.lat) / (max_lat_ - min_lat_) * 256);
@@ -522,6 +543,46 @@ class Tile {
   }
 
  private:
+  // Project hexagon corners (lat/lon) to pixel coordinates within this tile's 256x256 image
+  std::vector<cv::Point> hexToPixelPolygon(const std::vector<Coordinate>& vertices) const {
+    std::vector<cv::Point> polygon;
+    polygon.reserve(vertices.size());
+    for (const auto& v : vertices) {
+      int px = static_cast<int>((v.lon - min_lon_) / (max_lon_ - min_lon_) * 256);
+      int py = static_cast<int>((max_lat_ - v.lat) / (max_lat_ - min_lat_) * 256);
+      polygon.emplace_back(px, py);
+    }
+    return polygon;
+  }
+
+  // Axial (q, r) coordinates of every hexagon whose bounding area could overlap this tile
+  std::vector<std::pair<int, int>> hexesOverlappingTile(double tile_size) const {
+    auto [min_x, min_y] = latLonToMeters(min_lat_, min_lon_);
+    auto [max_x, max_y] = latLonToMeters(max_lat_, max_lon_);
+    auto toAxial = [&](double x, double y) {
+      double q = (HEX_SQRT3 / 3.0 * x - y / 3.0) / tile_size;
+      double r = (2.0 / 3.0 * y) / tile_size;
+      return std::make_pair(q, r);
+    };
+    auto [q1, r1] = toAxial(min_x, min_y);
+    auto [q2, r2] = toAxial(min_x, max_y);
+    auto [q3, r3] = toAxial(max_x, min_y);
+    auto [q4, r4] = toAxial(max_x, max_y);
+    // Pad by one extra ring so hexagons whose center falls outside the tile still get drawn.
+    int q_start = static_cast<int>(std::floor(std::min({q1, q2, q3, q4}))) - 1;
+    int q_end = static_cast<int>(std::ceil(std::max({q1, q2, q3, q4}))) + 1;
+    int r_start = static_cast<int>(std::floor(std::min({r1, r2, r3, r4}))) - 1;
+    int r_end = static_cast<int>(std::ceil(std::max({r1, r2, r3, r4}))) + 1;
+
+    std::vector<std::pair<int, int>> hexes;
+    for (int q = q_start; q <= q_end; ++q) {
+      for (int r = r_start; r <= r_end; ++r) {
+        hexes.emplace_back(q, r);
+      }
+    }
+    return hexes;
+  }
+
   cv::Mat image_data_;
   int z_;
   int x_;
