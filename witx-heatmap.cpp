@@ -102,7 +102,7 @@ double meter2size(double size) {
 struct SquadratTile {
   int squadrat_x{};    // X index of the tile in the grid EPSG 3857
   int squadrat_y{};    // Y index of the tile in the grid EPSG 3857
-  double tile_size{};  // Size of the tile in meters
+  double tile_size{};  // Size of the tile in corrected meters
 
   bool operator<(const SquadratTile& other) const {
     return std::tie(squadrat_x, squadrat_y) < std::tie(other.squadrat_x, other.squadrat_y);
@@ -114,17 +114,17 @@ struct SquadratTile {
   SquadratTile(double lat, double lon, double tile_size) {
     // Convert to EPSG 3857 meters
     auto [x, y] = latLonToMeters(lat, lon);
-    squadrat_x = static_cast<int>(std::floor(x / meter2size(tile_size)));
-    squadrat_y = static_cast<int>(std::floor(y / meter2size(tile_size)));
+    squadrat_x = static_cast<int>(std::floor(x / tile_size));
+    squadrat_y = static_cast<int>(std::floor(y / tile_size));
     this->tile_size = tile_size;
   }
 
   // Get the bounding box of the tile in lat/lon degrees
   std::pair<Coordinate, Coordinate> getBBox() const {
-    double min_x = squadrat_x * meter2size(tile_size);
-    double min_y = squadrat_y * meter2size(tile_size);
-    double max_x = (squadrat_x + 1) * meter2size(tile_size);
-    double max_y = (squadrat_y + 1) * meter2size(tile_size);
+    double min_x = squadrat_x * tile_size;
+    double min_y = squadrat_y * tile_size;
+    double max_x = (squadrat_x + 1) * tile_size;
+    double max_y = (squadrat_y + 1) * tile_size;
     auto [min_lat, min_lon] = metersToLatLon(min_x, min_y);
     auto [max_lat, max_lon] = metersToLatLon(max_x, max_y);
     return {Coordinate{min_lat, min_lon}, Coordinate{max_lat, max_lon}};
@@ -357,19 +357,19 @@ class Tile {
     auto [min_x, min_y] = latLonToMeters(min_lat_, min_lon_);
     auto [max_x, max_y] = latLonToMeters(max_lat_, max_lon_);
 
-    long long x_start = static_cast<long long>(std::floor(min_x / meter2size(tile_size)));
-    long long x_end = static_cast<long long>(std::ceil(max_x / meter2size(tile_size)));
+    long long x_start = static_cast<long long>(std::floor(min_x / tile_size));
+    long long x_end = static_cast<long long>(std::ceil(max_x / tile_size));
     cv::Scalar grey(20, 20, 20, alpha);
     for (long long i = x_start; i <= x_end; ++i) {
-      auto [lat, lon] = metersToLatLon(i * meter2size(tile_size), 0.0);
+      auto [lat, lon] = metersToLatLon(i * tile_size, 0.0);
       int px = static_cast<int>((lon - min_lon_) / (max_lon_ - min_lon_) * 256);
       cv::line(image_data_, cv::Point(px, 0), cv::Point(px, 256), grey, 1, cv::LINE_AA);
     }
 
-    long long y_start = static_cast<long long>(std::floor(min_y / meter2size(tile_size)));
-    long long y_end = static_cast<long long>(std::ceil(max_y / meter2size(tile_size)));
+    long long y_start = static_cast<long long>(std::floor(min_y / tile_size));
+    long long y_end = static_cast<long long>(std::ceil(max_y / tile_size));
     for (long long j = y_start; j <= y_end; ++j) {
-      auto [lat, lon] = metersToLatLon(0.0, j * meter2size(tile_size));
+      auto [lat, lon] = metersToLatLon(0.0, j * tile_size);
       int py = static_cast<int>((max_lat_ - lat) / (max_lat_ - min_lat_) * 256);
       cv::line(image_data_, cv::Point(0, py), cv::Point(256, py), grey, 1, cv::LINE_AA);
     }
@@ -680,10 +680,11 @@ class AlphaShapeTileGenerator : public TileGenerator {
 
 class SquadratTileGenerator : public TileGenerator {
  public:
-  SquadratTileGenerator(const std::vector<MatchedRoute>& matched_routes, double tile_size) : tile_size_(tile_size) {
+  SquadratTileGenerator(const std::vector<MatchedRoute>& matched_routes, double tile_size_raw)
+      : tile_size_(meter2size(tile_size_raw)) {
     for (const auto& matched_route : matched_routes) {
       for (const auto& coordinate : matched_route.route.route) {
-        squadrat_tiles_.emplace(coordinate.lat, coordinate.lon, tile_size);
+        squadrat_tiles_.emplace(coordinate.lat, coordinate.lon, tile_size_);
       }
     }
   }
