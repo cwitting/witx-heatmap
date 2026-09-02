@@ -17,7 +17,6 @@
 #include <mutex>
 #include <opencv2/core/mat.hpp>
 #include <opencv4/opencv2/opencv.hpp>
-#include <optional>
 #include <stdexcept>
 #include <tuple>
 #include <unordered_map>
@@ -26,10 +25,16 @@
 #include "httplib.h"
 #include "json.hpp"
 
-#define ROUTE_FILE "/home/christian/git/witx-heatmap/data/christian_strava2.geojson"
 #define VALHALLA_CONFIG_FILE "/home/christian/git/witx-heatmap/data/routing/valhalla_data/valhalla.json"
-#define HEATMAP_FILE "/home/christian/git/witx-heatmap/data/heatmap.json"
 #define RESTORE 1
+
+// Christian
+#define ROUTE_FILE "/media/christian/Data/Backup/strava/strava_christian_simple.geojson"
+#define HEATMAP_FILE "/home/christian/git/witx-heatmap/data/heatmap.json"
+
+// Thomas
+// #define ROUTE_FILE "/media/christian/Data/Backup/strava/strava_thomas_simple.geojson"
+// #define HEATMAP_FILE "/home/christian/git/witx-heatmap/data/heatmap_thomas.json"
 
 struct Coordinate {
   double lat{};
