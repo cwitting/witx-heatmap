@@ -91,17 +91,18 @@ std::pair<double, double> metersToLatLon(double x, double y) {
 }
 
 // 1x1 km square tile which can be visited for coverage
-#define SQUADRAT_TILE_SIZE 1.0  // in km
 // EPSG:3857 (Web Mercator) inflates east-west/north-south distances by 1/cos(lat) away from the
 // equator, so a fixed-size square in projected meters isn't a real-world square everywhere.
 // Scale the tile size so it measures exactly SQUADRAT_TILE_SIZE km at the reference latitude below.
 #define SQUADRAT_REFERENCE_LATITUDE_DEG 55.6161  // Lejre, Denmark
-static const double SQUADRAT_TILE_SIZE_METERS =
-    SQUADRAT_TILE_SIZE * 1000.0 / std::cos(SQUADRAT_REFERENCE_LATITUDE_DEG * M_PI / 180.0);
+double meter2size(double size) {
+  return size / std::cos(SQUADRAT_REFERENCE_LATITUDE_DEG * M_PI / 180.0);
+};
 
 struct SquadratTile {
-  int squadrat_x{};  // X index of the tile in the grid EPSG 3857
-  int squadrat_y{};  // Y index of the tile in the grid EPSG 3857
+  int squadrat_x{};    // X index of the tile in the grid EPSG 3857
+  int squadrat_y{};    // Y index of the tile in the grid EPSG 3857
+  double tile_size{};  // Size of the tile in meters
 
   bool operator<(const SquadratTile& other) const {
     return std::tie(squadrat_x, squadrat_y) < std::tie(other.squadrat_x, other.squadrat_y);
@@ -110,33 +111,33 @@ struct SquadratTile {
   SquadratTile() = default;  // needed for JSON deserialization
 
   // Generate the tile from a point (lat, lon) in degrees
-  SquadratTile(double lat, double lon) {
+  SquadratTile(double lat, double lon, double tile_size) {
     // Convert to EPSG 3857 meters
     auto [x, y] = latLonToMeters(lat, lon);
-    squadrat_x = static_cast<int>(std::floor(x / SQUADRAT_TILE_SIZE_METERS));
-    squadrat_y = static_cast<int>(std::floor(y / SQUADRAT_TILE_SIZE_METERS));
+    squadrat_x = static_cast<int>(std::floor(x / meter2size(tile_size)));
+    squadrat_y = static_cast<int>(std::floor(y / meter2size(tile_size)));
+    this->tile_size = tile_size;
   }
 
   // Get the bounding box of the tile in lat/lon degrees
   std::pair<Coordinate, Coordinate> getBBox() const {
-    double min_x = squadrat_x * SQUADRAT_TILE_SIZE_METERS;
-    double min_y = squadrat_y * SQUADRAT_TILE_SIZE_METERS;
-    double max_x = (squadrat_x + 1) * SQUADRAT_TILE_SIZE_METERS;
-    double max_y = (squadrat_y + 1) * SQUADRAT_TILE_SIZE_METERS;
+    double min_x = squadrat_x * meter2size(tile_size);
+    double min_y = squadrat_y * meter2size(tile_size);
+    double max_x = (squadrat_x + 1) * meter2size(tile_size);
+    double max_y = (squadrat_y + 1) * meter2size(tile_size);
     auto [min_lat, min_lon] = metersToLatLon(min_x, min_y);
     auto [max_lat, max_lon] = metersToLatLon(max_x, max_y);
     return {Coordinate{min_lat, min_lon}, Coordinate{max_lat, max_lon}};
   }
 };
-NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE(SquadratTile, squadrat_x, squadrat_y)
+NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE(SquadratTile, squadrat_x, squadrat_y, tile_size)
 
 struct MatchedRoute {
   Route route;
   std::vector<WaySegment> way_segments;
-  std::set<SquadratTile> squadrat_tiles;
 };
 
-NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE(MatchedRoute, route, way_segments, squadrat_tiles)
+NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE(MatchedRoute, route, way_segments)
 
 static double haversineDistance(const Coordinate& coord1, const Coordinate& coord2) {
   constexpr double EARTH_RADIUS_KM = 6371.0;
@@ -345,7 +346,7 @@ class Tile {
   }
 
   // Draw the full squadrat grid (every 1km line), regardless of which tiles were visited
-  void paintGrid() {
+  void paintGrid(double tile_size) {
     if (z_ < 11) {
       return;  // Only draw grid for zoom levels 11 and above
     }
@@ -356,19 +357,19 @@ class Tile {
     auto [min_x, min_y] = latLonToMeters(min_lat_, min_lon_);
     auto [max_x, max_y] = latLonToMeters(max_lat_, max_lon_);
 
-    long long x_start = static_cast<long long>(std::floor(min_x / SQUADRAT_TILE_SIZE_METERS));
-    long long x_end = static_cast<long long>(std::ceil(max_x / SQUADRAT_TILE_SIZE_METERS));
+    long long x_start = static_cast<long long>(std::floor(min_x / meter2size(tile_size)));
+    long long x_end = static_cast<long long>(std::ceil(max_x / meter2size(tile_size)));
     cv::Scalar grey(20, 20, 20, alpha);
     for (long long i = x_start; i <= x_end; ++i) {
-      auto [lat, lon] = metersToLatLon(i * SQUADRAT_TILE_SIZE_METERS, 0.0);
+      auto [lat, lon] = metersToLatLon(i * meter2size(tile_size), 0.0);
       int px = static_cast<int>((lon - min_lon_) / (max_lon_ - min_lon_) * 256);
       cv::line(image_data_, cv::Point(px, 0), cv::Point(px, 256), grey, 1, cv::LINE_AA);
     }
 
-    long long y_start = static_cast<long long>(std::floor(min_y / SQUADRAT_TILE_SIZE_METERS));
-    long long y_end = static_cast<long long>(std::ceil(max_y / SQUADRAT_TILE_SIZE_METERS));
+    long long y_start = static_cast<long long>(std::floor(min_y / meter2size(tile_size)));
+    long long y_end = static_cast<long long>(std::ceil(max_y / meter2size(tile_size)));
     for (long long j = y_start; j <= y_end; ++j) {
-      auto [lat, lon] = metersToLatLon(0.0, j * SQUADRAT_TILE_SIZE_METERS);
+      auto [lat, lon] = metersToLatLon(0.0, j * meter2size(tile_size));
       int py = static_cast<int>((max_lat_ - lat) / (max_lat_ - min_lat_) * 256);
       cv::line(image_data_, cv::Point(0, py), cv::Point(256, py), grey, 1, cv::LINE_AA);
     }
@@ -518,10 +519,6 @@ class RouteMatcher {
 
     MatchedRoute matched_route;
     matched_route.route = route;
-
-    for (const auto& coord : route.route) {
-      matched_route.squadrat_tiles.emplace(coord.lat, coord.lon);
-    }
 
     // For each traversed edge, slice out the sub-range of the leg shape it covers so we
     // know exactly which part of the way (not just which way) was used.
@@ -681,21 +678,24 @@ class AlphaShapeTileGenerator : public TileGenerator {
 
 class SquadratTileGenerator : public TileGenerator {
  public:
-  SquadratTileGenerator(const std::vector<MatchedRoute>& matched_routes, double size) {
+  SquadratTileGenerator(const std::vector<MatchedRoute>& matched_routes, double tile_size) : tile_size_(tile_size) {
     for (const auto& matched_route : matched_routes) {
-      squadrat_tiles_.insert(matched_route.squadrat_tiles.begin(), matched_route.squadrat_tiles.end());
+      for (const auto& coordinate : matched_route.route.route) {
+        squadrat_tiles_.emplace(coordinate.lat, coordinate.lon, tile_size);
+      }
     }
   }
 
   Tile generateTile(int z, int x, int y) override {
     Tile tile(z, x, y);
-    tile.paintGrid();
+    tile.paintGrid(tile_size_);
     tile.paint(squadrat_tiles_);
     return tile;
   }
 
  private:
   std::set<SquadratTile> squadrat_tiles_;
+  double tile_size_;
 };
 
 class TraversalTileGenerator : public TileGenerator {
@@ -819,22 +819,25 @@ int main(int argc, char** argv) {
     res.set_content(reinterpret_cast<const char*>(buffer.data()), buffer.size(), "image/png");
   });
 
-  std::unordered_map<int, std::unique_ptr<SquadratTileGenerator>> squadrat_tiles;
+  std::unordered_map<int, std::unique_ptr<SquadratTileGenerator>> squadrat_tile_generators;
   {
-    TimerLog squadrat_tiles_timer("Generating alpha shapes for radius 4000");
-    squadrat_tiles.emplace(4000, std::make_unique<SquadratTileGenerator>(matched_routes, static_cast<double>(1000)));
+    TimerLog squadrat_tiles_timer("Generating squadrats for radius 4000");
+    squadrat_tile_generators.emplace(
+        4000, std::make_unique<SquadratTileGenerator>(matched_routes, static_cast<double>(1000)));
   }
   {
-    TimerLog squadrat_tiles_timer("Generating alpha shapes for radius 7000");
-    squadrat_tiles.emplace(7000, std::make_unique<SquadratTileGenerator>(matched_routes, static_cast<double>(2500)));
+    TimerLog squadrat_tiles_timer("Generating squadrats for radius 7000");
+    squadrat_tile_generators.emplace(
+        7000, std::make_unique<SquadratTileGenerator>(matched_routes, static_cast<double>(2500)));
   }
   {
-    TimerLog squadrat_tiles_timer("Generating alpha shapes for radius 10000");
-    squadrat_tiles.emplace(10000, std::make_unique<SquadratTileGenerator>(matched_routes, static_cast<double>(5000)));
+    TimerLog squadrat_tiles_timer("Generating squadrats for radius 10000");
+    squadrat_tile_generators.emplace(
+        10000, std::make_unique<SquadratTileGenerator>(matched_routes, static_cast<double>(5000)));
   }
   std::mutex squadrat_tiles_mutex;
 
-  svr.Get(R"(/squadrat/(\d+)/(\d+)/(\d+).png)", [&matched_routes, &squadrat_tiles, &squadrat_tiles_mutex](
+  svr.Get(R"(/squadrat/(\d+)/(\d+)/(\d+).png)", [&matched_routes, &squadrat_tile_generators, &squadrat_tiles_mutex](
                                                     const httplib::Request& req, httplib::Response& res) {
     // Heatmap XYZ tile request from url like /tiles/{z}/{x}/{y}.png
     for (const auto& param : req.path_params) {
@@ -848,10 +851,10 @@ int main(int argc, char** argv) {
     // fprintf(stderr, "Received tile request for z=%d, x=%d, y=%d\n", z, x, y);
 
     // For now just return a placeholder PNG image (256x256 pixel)
-    auto it = squadrat_tiles.find(radius);
-    if (it == squadrat_tiles.end()) {
+    auto it = squadrat_tile_generators.find(radius);
+    if (it == squadrat_tile_generators.end()) {
       std::lock_guard<std::mutex> lock(squadrat_tiles_mutex);
-      it = squadrat_tiles
+      it = squadrat_tile_generators
                .emplace(radius, std::make_unique<SquadratTileGenerator>(matched_routes, static_cast<double>(radius)))
                .first;
     }
