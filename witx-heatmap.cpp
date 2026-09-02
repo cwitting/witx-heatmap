@@ -690,8 +690,8 @@ class SquadratTileGenerator : public TileGenerator {
 
   Tile generateTile(int z, int x, int y) override {
     Tile tile(z, x, y);
-    tile.paintGrid(tile_size_);
     tile.paint(squadrat_tiles_);
+    tile.paintGrid(tile_size_);
     return tile;
   }
 
