@@ -38,7 +38,15 @@ struct Coordinate {
 
 NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE(Coordinate, lat, lon)
 
-using Route = std::vector<Coordinate>;
+// using Route = std::vector<Coordinate>;
+
+struct Route {
+  std::string link;
+  std::string name;
+  std::vector<Coordinate> route;
+};
+
+NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE(Route, link, name, route)
 
 struct WaySegment {
   std::string way_id;
@@ -48,13 +56,13 @@ struct WaySegment {
   int traversal_count{};  // How many times this way-segment was traversed across all matched routes
 
   bool inBBox(double min_lat, double min_lon, double max_lat, double max_lon) const {
-    for (int i = 0; i < geometry.size(); ++i) {
-      const auto& coord = geometry[i];
+    for (int i = 0; i < geometry.route.size(); ++i) {
+      const auto& coord = geometry.route[i];
       if (coord.lat >= min_lat && coord.lat <= max_lat && coord.lon >= min_lon && coord.lon <= max_lon) {
         return true;
       }
       if (i > 0) {
-        const auto& prev_coord = geometry[i - 1];
+        const auto& prev_coord = geometry.route[i - 1];
         // Check if the line segment between prev_coord and coord intersects the bounding box
         if ((prev_coord.lat < min_lat && coord.lat > max_lat) || (prev_coord.lat > max_lat && coord.lat < min_lat) ||
             (prev_coord.lon < min_lon && coord.lon > max_lon) || (prev_coord.lon > max_lon && coord.lon < min_lon)) {
@@ -171,7 +179,7 @@ class AlphaShape {
 
       matched_routes_.push_back(matched_route);
 
-      for (const auto& coord : matched_route.route) {
+      for (const auto& coord : matched_route.route.route) {
         points_.emplace_back(coord.lat, coord.lon);
       }
     }
@@ -295,9 +303,9 @@ class Tile {
         continue;
       }
       count++;
-      for (size_t i = 1; i < segment.geometry.size(); ++i) {
-        const auto& p1 = segment.geometry[i - 1];
-        const auto& p2 = segment.geometry[i];
+      for (size_t i = 1; i < segment.geometry.route.size(); ++i) {
+        const auto& p1 = segment.geometry.route[i - 1];
+        const auto& p2 = segment.geometry.route[i];
         // fprintf(stderr, "Painting way %s (edge %llu) segment from (%.6f, %.6f) to (%.6f, %.6f)\n",
         //         segment.way_id.c_str(), static_cast<unsigned long long>(segment.edge_id), p1.lat, p1.lon, p2.lat,
         //         p2.lon);
@@ -315,9 +323,9 @@ class Tile {
   void paintRoute(const std::vector<MatchedRoute>& matched_routes) {
     int count = 0;
     for (const auto& matched_route : matched_routes) {
-      for (size_t i = 1; i < matched_route.route.size(); ++i) {
-        const auto& p1 = matched_route.route[i - 1];
-        const auto& p2 = matched_route.route[i];
+      for (size_t i = 1; i < matched_route.route.route.size(); ++i) {
+        const auto& p1 = matched_route.route.route[i - 1];
+        const auto& p2 = matched_route.route.route[i];
         // fprintf(stderr, "Painting way %s (edge %llu) segment from (%.6f, %.6f) to (%.6f, %.6f)\n",
         //         segment.way_id.c_str(), static_cast<unsigned long long>(segment.edge_id), p1.lat, p1.lon, p2.lat,
         //         p2.lon);
@@ -424,9 +432,11 @@ std::vector<Route> load_all_routes() {
     }
 
     Route route;
+    route.link = feature["properties"]["link"];
+    route.name = feature["properties"]["name"];
     for (const auto& point : geometry["coordinates"]) {
       // GeoJSON coordinates are [lon, lat]
-      route.push_back(Coordinate{point[1].get<double>(), point[0].get<double>()});
+      route.route.push_back(Coordinate{point[1].get<double>(), point[0].get<double>()});
     }
     routes.push_back(std::move(route));
   }
@@ -467,7 +477,7 @@ class RouteMatcher {
     request["costing"] = "pedestrian";
     request["shape_match"] = "map_snap";
     request["trace_options"] = {{"search_radius", 50}, {"gps_accuracy", 20}};
-    for (const auto& coord : route) {
+    for (const auto& coord : route.route) {
       request["shape"].push_back({{"lat", coord.lat}, {"lon", coord.lon}});
     }
 
@@ -486,7 +496,7 @@ class RouteMatcher {
     MatchedRoute matched_route;
     matched_route.route = route;
 
-    for (const auto& coord : route) {
+    for (const auto& coord : route.route) {
       matched_route.squadrat_tiles.emplace(coord.lat, coord.lon);
     }
 
@@ -502,7 +512,8 @@ class RouteMatcher {
           }
           size_t begin = std::min<size_t>(edge.begin_shape_index(), leg_shape.size() - 1);
           size_t end = std::min<size_t>(edge.end_shape_index(), leg_shape.size() - 1);
-          Route geometry(leg_shape.begin() + begin, leg_shape.begin() + end + 1);
+          Route geometry;
+          geometry.route.insert(geometry.route.end(), leg_shape.begin() + begin, leg_shape.begin() + end + 1);
           matched_route.way_segments.push_back({std::to_string(edge.way_id()), edge.id(), std::move(geometry)});
         }
       }
@@ -522,6 +533,7 @@ class RouteMatcher {
       auto matched_route = matchRoute(route);
       total_count++;
       if (!matched_route) {
+        fprintf(stderr, "Route matching failed for: %s, %s\n", route.name.c_str(), route.link.c_str());
         continue;
       }
       matched_routes.push_back(*matched_route);
