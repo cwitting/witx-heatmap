@@ -3,6 +3,7 @@
 #include <valhalla/config.h>
 #include <valhalla/tyr/actor.h>
 
+#include <algorithm>
 #include <boost/property_tree/ptree.hpp>
 #include <cmath>
 #include <cstddef>
@@ -45,6 +46,27 @@ NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE(Coordinate, lat, lon)
 
 // using Route = std::vector<Coordinate>;
 
+constexpr double MILLISECONDS_PER_DAY = 24 * 60 * 60 * 1000;
+
+static std::vector<cv::Scalar> default_colors = {
+    cv::Scalar(0, 255, 0, 200),    // green
+    cv::Scalar(0, 255, 255, 200),  // yellow
+    cv::Scalar(0, 0, 255, 200)     // red
+};
+
+cv::Scalar color_map(double value, std::vector<cv::Scalar> colors) {
+  if (colors.empty()) {
+    return cv::Scalar(0, 0, 0, 200);  // default to black if no colors provided
+  }
+  value = std::clamp(value, 0.0, 1.0);
+  std::size_t lower_index = static_cast<std::size_t>(value * (colors.size() - 1));
+  std::size_t upper_index = std::min(lower_index + 1, colors.size() - 1);
+  double t = value * (colors.size() - 1) - lower_index;
+  cv::Scalar lower_color = colors[lower_index];
+  cv::Scalar upper_color = colors[upper_index];
+  return lower_color * (1.0 - t) + upper_color * t;
+}
+
 struct Route {
   std::string link;
   std::string name;
@@ -68,6 +90,53 @@ struct WaySegment {
                           // maximal way-segment traversed, safe to use as a traversal-count key
   Route geometry;         // The portion of the way's geometry actually traversed by the route
   int traversal_count{};  // How many times this way-segment was traversed across all matched routes
+  double first_traversal_time{};
+  double last_traversal_time{};
+  static double all_last_traversal_time;
+
+  void visit(double time) {
+    if (first_traversal_time == 0 || time < first_traversal_time) {
+      first_traversal_time = time;
+    }
+    if (time > last_traversal_time) {
+      last_traversal_time = time;
+    }
+    if (time > all_last_traversal_time) {
+      all_last_traversal_time = time;
+    }
+  }
+
+  double getFirstVisitTime() const {
+    return first_traversal_time;
+  }
+
+  double getLastVisitTime() const {
+    return last_traversal_time;
+  }
+
+  double getFirstVisitAge() const {
+    return std::max(0.0, all_last_traversal_time - first_traversal_time) / MILLISECONDS_PER_DAY;
+  }
+
+  double getLastVisitAge() const {
+    return std::max(0.0, all_last_traversal_time - last_traversal_time) / MILLISECONDS_PER_DAY;
+  }
+
+  static constexpr double AGE_THRESHOLD = 365;
+
+  cv::Scalar getFirstVisitColor() const {
+    double age = std::min(1.0, getFirstVisitAge() / AGE_THRESHOLD);
+    cv::Scalar color = color_map(age, default_colors);
+    color[3] = 255;  // Ensure the alpha channel is set to 255
+    return color;
+  }
+
+  cv::Scalar getLastVisitColor() const {
+    double age = std::min(1.0, getLastVisitAge() / AGE_THRESHOLD);
+    cv::Scalar color = color_map(age, default_colors);
+    color[3] = 255;  // Ensure the alpha channel is set to 255
+    return color;
+  }
 
   bool inBBox(double min_lat, double min_lon, double max_lat, double max_lon) const {
     for (int i = 0; i < geometry.route.size(); ++i) {
@@ -88,7 +157,10 @@ struct WaySegment {
   }
 };
 
-NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE(WaySegment, way_id, edge_id, geometry, traversal_count)
+double WaySegment::all_last_traversal_time = 0;
+
+NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE(WaySegment, way_id, edge_id, geometry, traversal_count, first_traversal_time,
+                                   last_traversal_time, all_last_traversal_time)
 
 std::pair<double, double> latLonToMeters(double lat, double lon) {
   double x = lon * 20037508.34 / 180.0;
@@ -113,26 +185,6 @@ double meter2size(double size) {
   return size / std::cos(SQUADRAT_REFERENCE_LATITUDE_DEG * M_PI / 180.0);
 };
 
-static std::vector<cv::Scalar> default_colors = {
-    cv::Scalar(0, 255, 0, 200),    // green
-    cv::Scalar(0, 255, 255, 200),  // yellow
-    cv::Scalar(0, 0, 255, 200)     // red
-};
-
-cv::Scalar color_map(double value, std::vector<cv::Scalar> colors) {
-  if (colors.empty()) {
-    return cv::Scalar(0, 0, 0, 200);  // default to black if no colors provided
-  }
-  value = std::clamp(value, 0.0, 1.0);
-  std::size_t lower_index = static_cast<std::size_t>(value * (colors.size() - 1));
-  std::size_t upper_index = std::min(lower_index + 1, colors.size() - 1);
-  double t = value * (colors.size() - 1) - lower_index;
-  cv::Scalar lower_color = colors[lower_index];
-  cv::Scalar upper_color = colors[upper_index];
-  return lower_color * (1.0 - t) + upper_color * t;
-}
-
-constexpr double MILLISECONDS_PER_DAY = 24 * 60 * 60 * 1000;
 constexpr double HEX_SQRT3 = 1.7320508075688772;
 
 // 1x1 km hexagonal tile which can be visited for coverage. Uses "pointy-top" axial coordinates
@@ -426,9 +478,9 @@ class Tile {
     //         min_lat_, max_lat_, min_lon_, max_lon_);
   }
 
-  void paintMatches(const std::unordered_map<std::size_t, WaySegment>& way_segments) {
+  void paintMatches(const std::vector<WaySegment>& way_segments) {
     int count = 0;
-    for (const auto& [key, segment] : way_segments) {
+    for (const auto& segment : way_segments) {
       if (!segment.inBBox(min_lat_, min_lon_, max_lat_, max_lon_)) {
         continue;
       }
@@ -443,8 +495,12 @@ class Tile {
         int y1 = static_cast<int>((max_lat_ - p1.lat) / (max_lat_ - min_lat_) * 256);
         int x2 = static_cast<int>((p2.lon - min_lon_) / (max_lon_ - min_lon_) * 256);
         int y2 = static_cast<int>((max_lat_ - p2.lat) / (max_lat_ - min_lat_) * 256);
-        int alpha = std::min(255, segment.traversal_count * 10 + 50);  // Adjust the multiplier for desired opacity
-        cv::line(image_data_, cv::Point(x1, y1), cv::Point(x2, y2), cv::Scalar(255, 0, 0, 255), 2, cv::LINE_AA);
+        double age = segment.getLastVisitAge();  // days
+        // double thickness = std::clamp(5.0 * (1.0 - age / 365.0), 1.0, 5.0);  // Clamp thickness between 1 and 5
+        // pixels
+        double thickness = 2.0;  // Default thickness for the line
+        cv::line(image_data_, cv::Point(x1, y1), cv::Point(x2, y2), segment.getLastVisitColor(),
+                 static_cast<int>(thickness), cv::LINE_AA);
       }
     }
     // fprintf(stderr, "Painted %d way segments on tile z=%d, x=%d, y=%d\n", count, z_, x_, y_);
@@ -681,6 +737,7 @@ class RouteMatcher {
 
     // For each traversed edge, slice out the sub-range of the leg shape it covers so we
     // know exactly which part of the way (not just which way) was used.
+    double visit_time = route.getMilliseconds();
     for (const auto& trip_route : api.trip().routes()) {
       for (const auto& leg : trip_route.legs()) {
         auto leg_shape = decodePolyline(leg.shape());
@@ -694,6 +751,7 @@ class RouteMatcher {
           Route geometry;
           geometry.route.insert(geometry.route.end(), leg_shape.begin() + begin, leg_shape.begin() + end + 1);
           matched_route.way_segments.push_back({std::to_string(edge.way_id()), edge.id(), std::move(geometry)});
+          matched_route.way_segments.back().visit(visit_time);
         }
       }
     }
@@ -863,16 +921,27 @@ class SquadratTileGenerator : public TileGenerator {
 class TraversalTileGenerator : public TileGenerator {
  public:
   TraversalTileGenerator(const std::vector<MatchedRoute>& matched_routes) {
+    std::unordered_map<std::size_t, WaySegment> traversal_counts;
     for (const auto& matched_route : matched_routes) {
+      double visit_time = matched_route.route.getMilliseconds();
       for (const auto& segment : matched_route.way_segments) {
-        auto it = traversal_counts_.find(segment.edge_id);
-        if (it == traversal_counts_.end()) {
-          traversal_counts_[segment.edge_id] = segment;
+        auto it = traversal_counts.find(segment.edge_id);
+        if (it == traversal_counts.end()) {
+          traversal_counts[segment.edge_id] = segment;
+          traversal_counts[segment.edge_id].visit(visit_time);
         } else {
           it->second.traversal_count += 1;
+          it->second.visit(visit_time);
         }
       }
     }
+    // Sort after visit time and insert in traversal_counts_
+    traversal_counts_.clear();
+    for (const auto& [key, segment] : traversal_counts) {
+      traversal_counts_.push_back(segment);
+    }
+    std::sort(traversal_counts_.begin(), traversal_counts_.end(),
+              [](const WaySegment& a, const WaySegment& b) { return a.getLastVisitTime() < b.getLastVisitTime(); });
   }
 
   Tile generateTile(int z, int x, int y) override {
@@ -882,7 +951,7 @@ class TraversalTileGenerator : public TileGenerator {
   }
 
  private:
-  std::unordered_map<std::size_t, WaySegment> traversal_counts_;
+  std::vector<WaySegment> traversal_counts_;
 };
 
 int main(int argc, char** argv) {
@@ -1027,6 +1096,27 @@ int main(int argc, char** argv) {
     res.set_content(reinterpret_cast<const char*>(buffer.data()), buffer.size(), "image/png");
   });
 
+  TraversalTileGenerator traversal_tile_generator(matched_routes);
+
+  svr.Get(R"(/traversal/(\d+)/(\d+)/(\d+).png)",
+          [&traversal_tile_generator](const httplib::Request& req, httplib::Response& res) {
+            // Heatmap XYZ tile request from url like /traversal/{z}/{x}/{y}.png
+            for (const auto& param : req.path_params) {
+              fprintf(stderr, "Path param: %s = %s\n", param.first.c_str(), param.second.c_str());
+            }
+            int z = std::stoi(req.matches[1]);
+            int x = std::stoi(req.matches[2]);
+            int y = std::stoi(req.matches[3]);
+            std::string user = req.has_param("user") ? req.get_param_value("user") : "";
+
+            // For now just return a placeholder PNG image (256x256 pixel)
+            Tile tile = traversal_tile_generator.getTile(z, x, y);
+            cv::Mat png_data = tile.getImage();
+            std::vector<unsigned char> buffer;
+            cv::imencode(".png", png_data, buffer);
+            res.set_content(reinterpret_cast<const char*>(buffer.data()), buffer.size(), "image/png");
+          });
+
   svr.set_exception_handler([](const auto& req, auto& res, std::exception_ptr ep) {
     auto fmt = "<h1>Error 500</h1><p>%s</p>";
     char buf[BUFSIZ];
@@ -1052,19 +1142,12 @@ int main(int argc, char** argv) {
   std::cout << "Server starting on http://0.0f.0f.0f:8080" << std::endl;
   std::cout << "\nEndpoints:" << std::endl;
   std::cout << "  GET /health - Health check" << std::endl;
-  std::cout << "  GET /plan?lat=55.59813&lon=11.97320&depth=10&radius=10&samples=8&target_distance=50" << std::endl;
+  std::cout << "  GET /tile?z=0&x=0&y=0&radius=10" << std::endl;
   std::cout << "\nParameters:" << std::endl;
-  std::cout << "  lat              - Origin latitude (default: 55.59813)" << std::endl;
-  std::cout << "  lon              - Origin longitude (default: 11.97320)" << std::endl;
-  std::cout << "  depth            - Tree depth (default: 10)" << std::endl;
-  std::cout << "  radius           - Search radius in km (default: 10)" << std::endl;
-  std::cout << "  samples          - Samples per node (default: 8)" << std::endl;
-  std::cout << "  target_distance  - Target route distance in km (default: 50)" << std::endl;
-  std::cout << "  distance_deviation - Distance deviation tolerance (default: 5000)" << std::endl;
-  std::cout << "  max_overlap      - Max overlap percentage (default: 0.0f2)" << std::endl;
-  std::cout << "  min_gravel       - Min gravel percentage (default: 0.2)" << std::endl;
-  std::cout << "  format           - Output format: geojson or gpx (default: geojson)" << std::endl;
-  std::cout << "==================================================" << std::endl;
+  std::cout << "  z       - Zoom level (default: 0)" << std::endl;
+  std::cout << "  x       - Tile x coordinate (default: 0)" << std::endl;
+  std::cout << "  y       - Tile y coordinate (default: 0)" << std::endl;
+  std::cout << "  radius  - Search radius in km (default: 10)" << std::endl;
 
   svr.listen("0.0.0.0", 8080);
 
