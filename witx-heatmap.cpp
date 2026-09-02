@@ -48,10 +48,19 @@ NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE(Coordinate, lat, lon)
 struct Route {
   std::string link;
   std::string name;
+  std::string date;
   std::vector<Coordinate> route;
+  double getMilliseconds() const {
+    // Format is Sep 1, 2026, 12:52:03 PM
+    std::tm tm{};
+    if (strptime(date.c_str(), "%b %d, %Y, %I:%M:%S %p", &tm) == nullptr) {
+      throw std::runtime_error("Failed to parse date: " + date);
+    }
+    return static_cast<double>(std::mktime(&tm)) * 1000.0;
+  }
 };
 
-NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE(Route, link, name, route)
+NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE(Route, link, name, date, route)
 
 struct WaySegment {
   std::string way_id;
@@ -104,10 +113,34 @@ double meter2size(double size) {
   return size / std::cos(SQUADRAT_REFERENCE_LATITUDE_DEG * M_PI / 180.0);
 };
 
+static std::vector<cv::Scalar> default_colors = {
+    cv::Scalar(0, 255, 0, 200),    // green
+    cv::Scalar(0, 255, 255, 200),  // yellow
+    cv::Scalar(0, 0, 255, 200)     // red
+};
+
+cv::Scalar color_map(double value, std::vector<cv::Scalar> colors) {
+  if (colors.empty()) {
+    return cv::Scalar(0, 0, 0, 200);  // default to black if no colors provided
+  }
+  value = std::clamp(value, 0.0, 1.0);
+  std::size_t lower_index = static_cast<std::size_t>(value * (colors.size() - 1));
+  std::size_t upper_index = std::min(lower_index + 1, colors.size() - 1);
+  double t = value * (colors.size() - 1) - lower_index;
+  cv::Scalar lower_color = colors[lower_index];
+  cv::Scalar upper_color = colors[upper_index];
+  return lower_color * (1.0 - t) + upper_color * t;
+}
+
+constexpr double MILLISECONDS_PER_DAY = 24 * 60 * 60 * 1000;
+
 struct SquadratTile {
   int squadrat_x{};    // X index of the tile in the grid EPSG 3857
   int squadrat_y{};    // Y index of the tile in the grid EPSG 3857
   double tile_size{};  // Size of the tile in corrected meters
+  mutable double first_visit_time{};
+  mutable double last_visit_time{};
+  static double all_last_visit_time;
 
   bool operator<(const SquadratTile& other) const {
     return std::tie(squadrat_x, squadrat_y) < std::tie(other.squadrat_x, other.squadrat_y);
@@ -124,6 +157,47 @@ struct SquadratTile {
     this->tile_size = tile_size;
   }
 
+  void visit(double time) const {
+    if (first_visit_time == 0 || time < first_visit_time) {
+      first_visit_time = time;
+    }
+    if (time > last_visit_time) {
+      last_visit_time = time;
+    }
+    if (time > all_last_visit_time) {
+      all_last_visit_time = time;
+    }
+  }
+
+  double getFirstVisitTime() const {
+    return first_visit_time;
+  }
+
+  double getLastVisitTime() const {
+    return last_visit_time;
+  }
+
+  double getFirstVisitAge() const {
+    return std::max(0.0, all_last_visit_time - first_visit_time) / MILLISECONDS_PER_DAY;
+  }
+
+  double getLastVisitAge() const {
+    return std::max(0.0, all_last_visit_time - last_visit_time) / MILLISECONDS_PER_DAY;
+  }
+
+  static constexpr double AGE_THRESHOLD = 365;
+
+  cv::Scalar getFirstVisitColor() const {
+    double age = std::min(1.0, getFirstVisitAge() / AGE_THRESHOLD);
+    // Age 0 = fresh (green), Age 1 = old (red)
+    return color_map(age, default_colors);
+  }
+
+  cv::Scalar getLastVisitColor() const {
+    double age = std::min(1.0, getLastVisitAge() / AGE_THRESHOLD);
+    return color_map(age, default_colors);
+  }
+
   // Get the bounding box of the tile in lat/lon degrees
   std::pair<Coordinate, Coordinate> getBBox() const {
     double min_x = squadrat_x * tile_size;
@@ -135,7 +209,11 @@ struct SquadratTile {
     return {Coordinate{min_lat, min_lon}, Coordinate{max_lat, max_lon}};
   }
 };
-NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE(SquadratTile, squadrat_x, squadrat_y, tile_size)
+
+double SquadratTile::all_last_visit_time = 0;
+
+NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE(SquadratTile, squadrat_x, squadrat_y, tile_size, first_visit_time, last_visit_time,
+                                   all_last_visit_time)
 
 struct MatchedRoute {
   Route route;
@@ -223,7 +301,12 @@ class AlphaShape {
                       static_cast<float>(max_x - min_x + 2.0), static_cast<float>(max_y - min_y + 2.0));
     cv::Subdiv2D subdiv(bounds);
     for (const auto& p : projected) {
-      subdiv.insert(p);
+      try {
+        subdiv.insert(p);
+      } catch (const cv::Exception& e) {
+        std::cerr << "Error inserting point into Subdiv2D: " << e.what() << std::endl;
+        std::cerr << "Point causing error: (" << p.x << ", " << p.y << ")" << std::endl;
+      }
     }
 
     std::vector<cv::Vec6f> triangles;
@@ -387,7 +470,16 @@ class Tile {
       int y1 = static_cast<int>((max_lat_ - max_coord.lat) / (max_lat_ - min_lat_) * 256);
       int x2 = static_cast<int>((max_coord.lon - min_lon_) / (max_lon_ - min_lon_) * 256);
       int y2 = static_cast<int>((max_lat_ - min_coord.lat) / (max_lat_ - min_lat_) * 256);
-      cv::rectangle(image_data_, cv::Point(x1, y1), cv::Point(x2, y2), cv::Scalar(0, 255, 0, 100), cv::FILLED);
+      cv::rectangle(image_data_, cv::Point(x1, y1), cv::Point(x2, y2), tile.getLastVisitColor(), cv::FILLED);
+      // Print the age in the center
+      cv::Point center((x1 + x2) / 2, (y1 + y2) / 2);
+      // Offset for text placement exactly in the center
+      center.x -= 10;  // Adjust the horizontal position of the text to be centered
+      center.y += 5;   // Adjust the vertical position of the text to be centered
+      if (z_ >= 11) {
+        cv::putText(image_data_, std::to_string((int)tile.getLastVisitAge()) + "d", center, cv::FONT_HERSHEY_SIMPLEX,
+                    0.4, cv::Scalar(0, 0, 0, 255), 1, cv::LINE_AA);
+      }
     }
   }
 
@@ -460,6 +552,7 @@ std::vector<Route> load_all_routes() {
     Route route;
     route.link = feature["properties"]["link"];
     route.name = feature["properties"]["name"];
+    route.date = feature["properties"]["date"];
     for (const auto& point : geometry["coordinates"]) {
       // GeoJSON coordinates are [lon, lat]
       route.route.push_back(Coordinate{point[1].get<double>(), point[0].get<double>()});
@@ -687,12 +780,13 @@ class SquadratTileGenerator : public TileGenerator {
   SquadratTileGenerator(const std::vector<MatchedRoute>& matched_routes, double tile_size_raw)
       : tile_size_(meter2size(tile_size_raw)) {
     for (const auto& matched_route : matched_routes) {
+      double visit_time = matched_route.route.getMilliseconds();
       for (const auto& coordinate : matched_route.route.route) {
-        squadrat_tiles_.emplace(coordinate.lat, coordinate.lon, tile_size_);
+        auto it = squadrat_tiles_.emplace(coordinate.lat, coordinate.lon, tile_size_);
+        it.first->visit(visit_time);
       }
     }
   }
-
   Tile generateTile(int z, int x, int y) override {
     Tile tile(z, x, y);
     tile.paint(squadrat_tiles_);
