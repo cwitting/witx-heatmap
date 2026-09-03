@@ -49,9 +49,9 @@ NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE(Coordinate, lat, lon)
 constexpr double MILLISECONDS_PER_DAY = 24 * 60 * 60 * 1000;
 
 static std::vector<cv::Scalar> default_colors = {
-    cv::Scalar(0, 255, 0, 200),    // green
-    cv::Scalar(0, 255, 255, 200),  // yellow
-    cv::Scalar(0, 0, 255, 200)     // red
+    cv::Scalar(0, 255, 0, 130),    // green
+    cv::Scalar(0, 255, 255, 130),  // yellow
+    cv::Scalar(0, 0, 255, 130)     // red
 };
 
 cv::Scalar color_map(double value, std::vector<cv::Scalar> colors) {
