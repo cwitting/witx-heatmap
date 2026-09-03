@@ -30,12 +30,12 @@
 #define RESTORE 1
 
 // Christian
-#define ROUTE_FILE "/media/christian/Data/Backup/strava/strava_christian_simple.geojson"
-#define HEATMAP_FILE "/home/christian/git/witx-heatmap/data/heatmap.json"
+// #define ROUTE_FILE "/media/christian/Data/Backup/strava/strava_christian_simple.geojson"
+// #define HEATMAP_FILE "/home/christian/git/witx-heatmap/data/heatmap.json"
 
 // Thomas
-// #define ROUTE_FILE "/media/christian/Data/Backup/strava/strava_thomas_simple.geojson"
-// #define HEATMAP_FILE "/home/christian/git/witx-heatmap/data/heatmap_thomas.json"
+#define ROUTE_FILE "/media/christian/Data/Backup/strava/strava_thomas_simple.geojson"
+#define HEATMAP_FILE "/home/christian/git/witx-heatmap/data/heatmap_thomas.json"
 
 struct Coordinate {
   double lat{};
@@ -703,9 +703,11 @@ class TimerLog {
 class RouteMatcher {
  public:
   RouteMatcher() {
-    fprintf(stderr, "Initializing Valhalla with config from: %s\n", VALHALLA_CONFIG_FILE);
+    char* valhalla_config_file = std::getenv("VALHALLA_CONFIG_FILE");
+    std::string valhalla_config_file_str(valhalla_config_file ? valhalla_config_file : VALHALLA_CONFIG_FILE);
+    fprintf(stderr, "Initializing Valhalla with config from: %s\n", valhalla_config_file_str.c_str());
     TimerLog timer("Valhalla initialization");
-    const auto& config = valhalla::config(VALHALLA_CONFIG_FILE);
+    const auto& config = valhalla::config(valhalla_config_file_str);
     // auto_cleanup releases the loki/thor/odin workers' caches between calls.
     actor_ = std::make_unique<valhalla::tyr::actor_t>(config, /*auto_cleanup=*/true);
   }
@@ -955,6 +957,13 @@ class TraversalTileGenerator : public TileGenerator {
 };
 
 int main(int argc, char** argv) {
+  std::string url_path = "/tiles";
+  int port = 9090;
+  if (argc > 2) {
+    url_path = argv[1];
+    port = std::stoi(argv[2]);
+  }
+
   // Create HTTP server
   httplib::Server svr;
 
@@ -983,21 +992,24 @@ int main(int argc, char** argv) {
   // Print program name
   fprintf(stderr, "Witx Heatmap Route Planner\n");
 
+  char* heatmap_file_path = std::getenv("HEATMAP_FILE_PATH");
+  std::string heatmap_file_path_str(heatmap_file_path ? heatmap_file_path : HEATMAP_FILE);
+
 #if !RESTORE
   auto routes = load_all_routes();
   RouteMatcher matcher;
   auto matched_routes = matcher.matchAllRoutes(routes);
   nlohmann::json heatmap_json = matched_routes;
-  std::ofstream heatmap_file(HEATMAP_FILE);
+  std::ofstream heatmap_file(heatmap_file_path_str);
   if (!heatmap_file.is_open()) {
-    throw std::runtime_error("Failed to open heatmap file for writing: " HEATMAP_FILE);
+    throw std::runtime_error("Failed to open heatmap file for writing: " + heatmap_file_path_str);
   }
   heatmap_file << heatmap_json.dump(2);
   heatmap_file.close();
 #else
-  std::ifstream heatmap_file(HEATMAP_FILE);
+  std::ifstream heatmap_file(heatmap_file_path_str);
   if (!heatmap_file.is_open()) {
-    throw std::runtime_error("Failed to open heatmap file for reading: " HEATMAP_FILE);
+    throw std::runtime_error("Failed to open heatmap file for reading: " + heatmap_file_path_str);
   }
   TimerLog restore_timer("Loading matched routes from heatmap.json");
   nlohmann::json heatmap_json;
@@ -1022,8 +1034,8 @@ int main(int argc, char** argv) {
   std::mutex alpha_shapes_mutex;
 
   // Main route planning endpoint
-  svr.Get(R"(/coverage/(\d+)/(\d+)/(\d+).png)", [&matched_routes, &alpha_shapes, &alpha_shapes_mutex](
-                                                    const httplib::Request& req, httplib::Response& res) {
+  svr.Get(url_path + R"(/coverage/(\d+)/(\d+)/(\d+).png)", [&matched_routes, &alpha_shapes, &alpha_shapes_mutex](
+                                                               const httplib::Request& req, httplib::Response& res) {
     // Heatmap XYZ tile request from url like /tiles/{z}/{x}/{y}.png
     for (const auto& param : req.path_params) {
       fprintf(stderr, "Path param: %s = %s\n", param.first.c_str(), param.second.c_str());
@@ -1052,24 +1064,25 @@ int main(int argc, char** argv) {
 
   std::unordered_map<int, std::unique_ptr<SquadratTileGenerator>> squadrat_tile_generators;
   {
-    TimerLog squadrat_tiles_timer("Generating squadrats for radius 4000");
+    TimerLog squadrat_tiles_timer("Generating squadrats for radius 1000");
     squadrat_tile_generators.emplace(
-        4000, std::make_unique<SquadratTileGenerator>(matched_routes, static_cast<double>(1000)));
+        1000, std::make_unique<SquadratTileGenerator>(matched_routes, static_cast<double>(1000)));
   }
   {
-    TimerLog squadrat_tiles_timer("Generating squadrats for radius 7000");
+    TimerLog squadrat_tiles_timer("Generating squadrats for radius 1600");
     squadrat_tile_generators.emplace(
         1600, std::make_unique<SquadratTileGenerator>(matched_routes, static_cast<double>(1600)));
   }
   {
-    TimerLog squadrat_tiles_timer("Generating squadrats for radius 10000");
+    TimerLog squadrat_tiles_timer("Generating squadrats for radius 2000");
     squadrat_tile_generators.emplace(
-        10000, std::make_unique<SquadratTileGenerator>(matched_routes, static_cast<double>(5000)));
+        2000, std::make_unique<SquadratTileGenerator>(matched_routes, static_cast<double>(2000)));
   }
   std::mutex squadrat_tiles_mutex;
 
-  svr.Get(R"(/squadrat/(\d+)/(\d+)/(\d+).png)", [&matched_routes, &squadrat_tile_generators, &squadrat_tiles_mutex](
-                                                    const httplib::Request& req, httplib::Response& res) {
+  svr.Get(url_path + R"(/squadrat/(\d+)/(\d+)/(\d+).png)", [&matched_routes, &squadrat_tile_generators,
+                                                            &squadrat_tiles_mutex](const httplib::Request& req,
+                                                                                   httplib::Response& res) {
     // Heatmap XYZ tile request from url like /tiles/{z}/{x}/{y}.png
     for (const auto& param : req.path_params) {
       fprintf(stderr, "Path param: %s = %s\n", param.first.c_str(), param.second.c_str());
@@ -1098,7 +1111,7 @@ int main(int argc, char** argv) {
 
   TraversalTileGenerator traversal_tile_generator(matched_routes);
 
-  svr.Get(R"(/traversal/(\d+)/(\d+)/(\d+).png)",
+  svr.Get(url_path + R"(/traversal/(\d+)/(\d+)/(\d+).png)",
           [&traversal_tile_generator](const httplib::Request& req, httplib::Response& res) {
             // Heatmap XYZ tile request from url like /traversal/{z}/{x}/{y}.png
             for (const auto& param : req.path_params) {
@@ -1139,8 +1152,8 @@ int main(int argc, char** argv) {
   std::cout << "\n==================================================" << std::endl;
   std::cout << "Route Planning API Server" << std::endl;
   std::cout << "==================================================" << std::endl;
-  std::cout << "Server starting on http://0.0f.0f.0f:8080" << std::endl;
-  std::cout << "\nEndpoints:" << std::endl;
+  std::cout << "Server starting on http://0.0.0.0:9090" << std::endl;
+  svr.listen("0.0.0.0", port);
   std::cout << "  GET /health - Health check" << std::endl;
   std::cout << "  GET /tile?z=0&x=0&y=0&radius=10" << std::endl;
   std::cout << "\nParameters:" << std::endl;
@@ -1149,7 +1162,7 @@ int main(int argc, char** argv) {
   std::cout << "  y       - Tile y coordinate (default: 0)" << std::endl;
   std::cout << "  radius  - Search radius in km (default: 10)" << std::endl;
 
-  svr.listen("0.0.0.0", 8080);
+  svr.listen("0.0.0.0", 9090);
 
   return 0;
 }
