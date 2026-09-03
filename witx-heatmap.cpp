@@ -336,6 +336,7 @@ class AlphaShape {
     constexpr Coordinate START_COORD{55.59784, 11.97298};
     constexpr double TOLERANCE_KM = 0.2;
     for (const auto& matched_route : matched_routes) {
+      /*
       if (matched_route.route.empty()) {
         continue;
       }
@@ -349,7 +350,7 @@ class AlphaShape {
       if (end_distance_km > TOLERANCE_KM) {
         continue;
       }
-
+      */
       matched_routes_.push_back(matched_route);
 
       for (const auto& coord : matched_route.route.route) {
