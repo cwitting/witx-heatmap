@@ -56,6 +56,10 @@ NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE(Coordinate, lat, lon)
 
 constexpr double MILLISECONDS_PER_DAY = 24 * 60 * 60 * 1000;
 
+static double millisecondsNow() {
+  return std::chrono::duration<double, std::milli>(std::chrono::system_clock::now().time_since_epoch()).count();
+}
+
 static std::vector<cv::Scalar> default_colors = {
     cv::Scalar(0, 255, 0, 130),    // green
     cv::Scalar(0, 255, 255, 130),  // yellow
@@ -110,7 +114,6 @@ struct WaySegment {
   int traversal_count{};  // How many times this way-segment was traversed across all matched routes
   double first_traversal_time{};
   double last_traversal_time{};
-  static double all_last_traversal_time;
 
   void visit(double time) {
     if (first_traversal_time == 0 || time < first_traversal_time) {
@@ -118,9 +121,6 @@ struct WaySegment {
     }
     if (time > last_traversal_time) {
       last_traversal_time = time;
-    }
-    if (time > all_last_traversal_time) {
-      all_last_traversal_time = time;
     }
   }
 
@@ -133,11 +133,11 @@ struct WaySegment {
   }
 
   double getFirstVisitAge() const {
-    return std::max(0.0, all_last_traversal_time - first_traversal_time) / MILLISECONDS_PER_DAY;
+    return std::max(0.0, millisecondsNow() - first_traversal_time) / MILLISECONDS_PER_DAY;
   }
 
   double getLastVisitAge() const {
-    return std::max(0.0, all_last_traversal_time - last_traversal_time) / MILLISECONDS_PER_DAY;
+    return std::max(0.0, millisecondsNow() - last_traversal_time) / MILLISECONDS_PER_DAY;
   }
 
   static constexpr double AGE_THRESHOLD = 365;
@@ -175,10 +175,8 @@ struct WaySegment {
   }
 };
 
-double WaySegment::all_last_traversal_time = 0;
-
 NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE(WaySegment, way_id, edge_id, geometry, traversal_count, first_traversal_time,
-                                   last_traversal_time, all_last_traversal_time)
+                                   last_traversal_time)
 
 std::pair<double, double> latLonToMeters(double lat, double lon) {
   double x = lon * 20037508.34 / 180.0;
@@ -213,7 +211,6 @@ struct SquadratTile {
   double tile_size{};  // Circumradius (center to corner) of the hexagon in corrected meters
   mutable double first_visit_time{};
   mutable double last_visit_time{};
-  static double all_last_visit_time;
 
   bool operator<(const SquadratTile& other) const {
     return std::tie(squadrat_q, squadrat_r) < std::tie(other.squadrat_q, other.squadrat_r);
@@ -238,9 +235,6 @@ struct SquadratTile {
     if (time > last_visit_time) {
       last_visit_time = time;
     }
-    if (time > all_last_visit_time) {
-      all_last_visit_time = time;
-    }
   }
 
   double getFirstVisitTime() const {
@@ -252,11 +246,11 @@ struct SquadratTile {
   }
 
   double getFirstVisitAge() const {
-    return std::max(0.0, all_last_visit_time - first_visit_time) / MILLISECONDS_PER_DAY;
+    return std::max(0.0, millisecondsNow() - first_visit_time) / MILLISECONDS_PER_DAY;
   }
 
   double getLastVisitAge() const {
-    return std::max(0.0, all_last_visit_time - last_visit_time) / MILLISECONDS_PER_DAY;
+    return std::max(0.0, millisecondsNow() - last_visit_time) / MILLISECONDS_PER_DAY;
   }
 
   static constexpr double AGE_THRESHOLD = 365;
@@ -317,10 +311,7 @@ struct SquadratTile {
   }
 };
 
-double SquadratTile::all_last_visit_time = 0;
-
-NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE(SquadratTile, squadrat_q, squadrat_r, tile_size, first_visit_time, last_visit_time,
-                                   all_last_visit_time)
+NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE(SquadratTile, squadrat_q, squadrat_r, tile_size, first_visit_time, last_visit_time)
 
 struct MatchedRoute {
   Route route;
@@ -1088,6 +1079,15 @@ class ActivityIngester {
       std::cout << "Ingest folder: " << ingest_folder_str_ << std::endl;
 
       while (true) {
+        // Clear cache once a day
+        if (millisecondsNow() - last_cleared_time_ > MILLISECONDS_PER_DAY) {
+          // Clear cache logic here
+          for (const auto& tile_generator : tile_generators_) {
+            tile_generator->clearCache();
+          }
+          last_cleared_time_ = millisecondsNow();
+        }
+
         ingestFolder(ingest_folder_str_, true);
         std::this_thread::sleep_for(std::chrono::seconds(60));
       }
@@ -1098,6 +1098,7 @@ class ActivityIngester {
   RouteMatcher ingest_matcher_;
   std::string ingest_folder_str_;
   std::thread ingest_thread_;
+  double last_cleared_time_ = millisecondsNow();
   std::vector<TileGenerator*> tile_generators_;
 };
 
