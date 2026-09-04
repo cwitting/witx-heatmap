@@ -18,6 +18,7 @@
 #include <mutex>
 #include <opencv2/core/mat.hpp>
 #include <opencv4/opencv2/opencv.hpp>
+#include <shared_mutex>
 #include <stdexcept>
 #include <tuple>
 #include <unordered_map>
@@ -30,12 +31,19 @@
 #define RESTORE 1
 
 // Christian
-// #define ROUTE_FILE "/media/christian/Data/Backup/strava/strava_christian_simple.geojson"
-// #define HEATMAP_FILE "/home/christian/git/witx-heatmap/data/heatmap.json"
+#define ROUTE_FILE "/media/christian/Data/Backup/strava/strava_christian_simple.geojson"
+#define HEATMAP_FILE "/home/christian/git/witx-heatmap/data/heatmap.json"
+#define INGEST_FOLDER "/home/christian/git/witx-heatmap/data/ingest_christian"
 
 // Thomas
-#define ROUTE_FILE "/media/christian/Data/Backup/strava/strava_thomas_simple.geojson"
-#define HEATMAP_FILE "/home/christian/git/witx-heatmap/data/heatmap_thomas.json"
+// #define ROUTE_FILE "/media/christian/Data/Backup/strava/strava_thomas_simple.geojson"
+// #define HEATMAP_FILE "/home/christian/git/witx-heatmap/data/heatmap_thomas.json"
+// #define INGEST_FOLDER "/home/christian/git/witx-heatmap/data/ingest_thomas"
+
+// Nikolaj
+// #define ROUTE_FILE "/media/christian/Data/Backup/strava/strava_nikolaj_simple.geojson"
+// #define HEATMAP_FILE "/home/christian/git/witx-heatmap/data/heatmap_nikolaj.json"
+// #define INGEST_FOLDER "/home/christian/git/witx-heatmap/data/ingest_nikolaj"
 
 struct Coordinate {
   double lat{};
@@ -71,12 +79,22 @@ struct Route {
   std::string link;
   std::string name;
   std::string date;
+  int date_format{};
   std::vector<Coordinate> route;
   double getMilliseconds() const {
     // Format is Sep 1, 2026, 12:52:03 PM
     std::tm tm{};
-    if (strptime(date.c_str(), "%b %d, %Y, %I:%M:%S %p", &tm) == nullptr) {
-      throw std::runtime_error("Failed to parse date: " + date);
+    if (date_format == 0) {
+      if (strptime(date.c_str(), "%b %d, %Y, %I:%M:%S %p", &tm) == nullptr) {
+        throw std::runtime_error("Failed to parse date: " + date);
+      }
+    } else {
+      // Format: 2026-08-29T11:21:42Z
+      std::istringstream ss(date);
+      ss >> std::get_time(&tm, "%Y-%m-%dT%H:%M:%SZ");
+      if (ss.fail()) {
+        throw std::runtime_error("Failed to parse date string: " + date);
+      }
     }
     return static_cast<double>(std::mktime(&tm)) * 1000.0;
   }
@@ -330,9 +348,13 @@ static double haversineDistance(const Coordinate& coord1, const Coordinate& coor
 
 class AlphaShape {
  public:
+  AlphaShape() = default;
   // alpha is the max circumradius (in meters) a Delaunay triangle may have to stay in the shape;
   // smaller alpha follows the point cloud's concavities more tightly, larger alpha tends to the convex hull.
-  AlphaShape(const std::vector<MatchedRoute>& matched_routes, double alpha) : alpha_(alpha) {
+  AlphaShape(double alpha) : alpha_(alpha) {
+  }
+
+  void addRoutes(const std::vector<MatchedRoute>& matched_routes) {
     constexpr Coordinate START_COORD{55.59784, 11.97298};
     constexpr double TOLERANCE_KM = 0.2;
     for (const auto& matched_route : matched_routes) {
@@ -701,6 +723,47 @@ class TimerLog {
   std::chrono::time_point<std::chrono::high_resolution_clock> start_;
 };
 
+// Decode polyline geometry
+static std::vector<Coordinate> decodePolyline(const std::string& encoded, double precision) {
+  std::vector<Coordinate> coordinates;
+  int index = 0;
+  int len = encoded.length();
+  int lat = 0;
+  int lng = 0;
+
+  while (index < len) {
+    int b;
+    int shift = 0;
+    int result = 0;
+
+    do {
+      b = encoded[index++] - 63;
+      result |= (b & 0x1f) << shift;
+      shift += 5;
+    } while (b >= 0x20);
+
+    int dlat = ((result & 1) ? ~(result >> 1) : (result >> 1));
+    lat += dlat;
+
+    shift = 0;
+    result = 0;
+
+    do {
+      b = encoded[index++] - 63;
+      result |= (b & 0x1f) << shift;
+      shift += 5;
+    } while (b >= 0x20);
+
+    int dlng = ((result & 1) ? ~(result >> 1) : (result >> 1));
+    lng += dlng;
+
+    // Valhalla's default shape_format is polyline6
+    coordinates.push_back(Coordinate{lat / precision, lng / precision});
+  }
+
+  return coordinates;
+}
+
 class RouteMatcher {
  public:
   RouteMatcher() {
@@ -743,7 +806,7 @@ class RouteMatcher {
     double visit_time = route.getMilliseconds();
     for (const auto& trip_route : api.trip().routes()) {
       for (const auto& leg : trip_route.legs()) {
-        auto leg_shape = decodePolyline(leg.shape());
+        auto leg_shape = decodePolyline(leg.shape(), 1e6);
         for (const auto& node : leg.node()) {
           const auto& edge = node.edge();
           if (edge.way_id() == 0 || leg_shape.empty()) {
@@ -786,47 +849,6 @@ class RouteMatcher {
 
  private:
   std::unique_ptr<valhalla::tyr::actor_t> actor_;
-
-  // Decode polyline geometry
-  std::vector<Coordinate> decodePolyline(const std::string& encoded) const {
-    std::vector<Coordinate> coordinates;
-    int index = 0;
-    int len = encoded.length();
-    int lat = 0;
-    int lng = 0;
-
-    while (index < len) {
-      int b;
-      int shift = 0;
-      int result = 0;
-
-      do {
-        b = encoded[index++] - 63;
-        result |= (b & 0x1f) << shift;
-        shift += 5;
-      } while (b >= 0x20);
-
-      int dlat = ((result & 1) ? ~(result >> 1) : (result >> 1));
-      lat += dlat;
-
-      shift = 0;
-      result = 0;
-
-      do {
-        b = encoded[index++] - 63;
-        result |= (b & 0x1f) << shift;
-        shift += 5;
-      } while (b >= 0x20);
-
-      int dlng = ((result & 1) ? ~(result >> 1) : (result >> 1));
-      lng += dlng;
-
-      // Valhalla's default shape_format is polyline6
-      coordinates.push_back(Coordinate{lat / 1e6, lng / 1e6});
-    }
-
-    return coordinates;
-  }
 };
 
 class TileKey {
@@ -876,6 +898,13 @@ class TileGenerator {
     return tile;
   }
 
+  void clearCache() {
+    std::lock_guard<std::mutex> lock(cache_mutex_);
+    tile_cache_.clear();
+  }
+
+  virtual void addRoutes(const std::vector<MatchedRoute>& matched_routes) = 0;
+
  private:
   std::mutex cache_mutex_;
   std::unordered_map<TileKey, Tile, TileKey::Hash> tile_cache_;
@@ -883,17 +912,26 @@ class TileGenerator {
 
 class AlphaShapeTileGenerator : public TileGenerator {
  public:
-  AlphaShapeTileGenerator(const std::vector<MatchedRoute>& matched_routes, double alpha)
-      : alpha_shape_(matched_routes, alpha) {
+  AlphaShapeTileGenerator(const std::vector<MatchedRoute>& matched_routes, double alpha) : alpha_shape_(alpha) {
+    addRoutes(matched_routes);
+  }
+
+  void addRoutes(const std::vector<MatchedRoute>& matched_routes) override {
+    std::scoped_lock<std::shared_mutex> full_lock(shared_mutex_);
+    alpha_shape_.addRoutes(matched_routes);
   }
 
   Tile generateTile(int z, int x, int y) override {
     Tile tile(z, x, y);
-    tile.paint(alpha_shape_);
+    {
+      std::shared_lock<std::shared_mutex> shared_lock(shared_mutex_);
+      tile.paint(alpha_shape_);
+    }
     return tile;
   }
 
  private:
+  std::shared_mutex shared_mutex_;
   AlphaShape alpha_shape_;
 };
 
@@ -901,22 +939,33 @@ class SquadratTileGenerator : public TileGenerator {
  public:
   SquadratTileGenerator(const std::vector<MatchedRoute>& matched_routes, double tile_size_raw)
       : tile_size_(meter2size(tile_size_raw)) {
+    addRoutes(matched_routes);
+  }
+
+  void addRoutes(const std::vector<MatchedRoute>& matched_routes) override {
     for (const auto& matched_route : matched_routes) {
       double visit_time = matched_route.route.getMilliseconds();
       for (const auto& coordinate : matched_route.route.route) {
+        std::scoped_lock<std::shared_mutex> full_lock(shared_mutex_);
         auto it = squadrat_tiles_.emplace(coordinate.lat, coordinate.lon, tile_size_);
         it.first->visit(visit_time);
       }
     }
+    clearCache();
   }
+
   Tile generateTile(int z, int x, int y) override {
     Tile tile(z, x, y);
-    tile.paint(squadrat_tiles_);
+    {
+      std::shared_lock<std::shared_mutex> shared_lock(shared_mutex_);
+      tile.paint(squadrat_tiles_);
+    }
     tile.paintGrid(tile_size_);
     return tile;
   }
 
  private:
+  std::shared_mutex shared_mutex_;
   std::set<SquadratTile> squadrat_tiles_;
   double tile_size_;
 };
@@ -924,6 +973,10 @@ class SquadratTileGenerator : public TileGenerator {
 class TraversalTileGenerator : public TileGenerator {
  public:
   TraversalTileGenerator(const std::vector<MatchedRoute>& matched_routes) {
+    addRoutes(matched_routes);
+  }
+
+  void addRoutes(const std::vector<MatchedRoute>& matched_routes) override {
     std::unordered_map<std::size_t, WaySegment> traversal_counts;
     for (const auto& matched_route : matched_routes) {
       double visit_time = matched_route.route.getMilliseconds();
@@ -939,23 +992,39 @@ class TraversalTileGenerator : public TileGenerator {
       }
     }
     // Sort after visit time and insert in traversal_counts_
+    std::scoped_lock<std::shared_mutex> full_lock(shared_mutex_);
     traversal_counts_.clear();
     for (const auto& [key, segment] : traversal_counts) {
       traversal_counts_.push_back(segment);
     }
     std::sort(traversal_counts_.begin(), traversal_counts_.end(),
               [](const WaySegment& a, const WaySegment& b) { return a.getLastVisitTime() < b.getLastVisitTime(); });
+    clearCache();
   }
 
   Tile generateTile(int z, int x, int y) override {
     Tile tile(z, x, y);
-    tile.paintMatches(traversal_counts_);
+    {
+      std::shared_lock<std::shared_mutex> shared_lock(shared_mutex_);
+      tile.paintMatches(traversal_counts_);
+    }
     return tile;
   }
 
  private:
+  std::shared_mutex shared_mutex_;
   std::vector<WaySegment> traversal_counts_;
 };
+
+static void persistHeatmap(const std::vector<MatchedRoute>& matched_routes, const std::string& heatmap_file_path_str) {
+  nlohmann::json heatmap_json = matched_routes;
+  std::ofstream heatmap_file(heatmap_file_path_str);
+  if (!heatmap_file.is_open()) {
+    throw std::runtime_error("Failed to open heatmap file for writing: " + heatmap_file_path_str);
+  }
+  heatmap_file << heatmap_json.dump(2);
+  heatmap_file.close();
+}
 
 int main(int argc, char** argv) {
   std::string url_path = "/tiles";
@@ -996,41 +1065,46 @@ int main(int argc, char** argv) {
   char* heatmap_file_path = std::getenv("HEATMAP_FILE_PATH");
   std::string heatmap_file_path_str(heatmap_file_path ? heatmap_file_path : HEATMAP_FILE);
 
+  std::vector<MatchedRoute> matched_routes;
+  {
 #if !RESTORE
-  auto routes = load_all_routes();
-  RouteMatcher matcher;
-  auto matched_routes = matcher.matchAllRoutes(routes);
-  nlohmann::json heatmap_json = matched_routes;
-  std::ofstream heatmap_file(heatmap_file_path_str);
-  if (!heatmap_file.is_open()) {
-    throw std::runtime_error("Failed to open heatmap file for writing: " + heatmap_file_path_str);
-  }
-  heatmap_file << heatmap_json.dump(2);
-  heatmap_file.close();
+    auto routes = load_all_routes();
+    RouteMatcher matcher;
+    matched_routes = matcher.matchAllRoutes(routes);
+    persistHeatmap(matched_routes, heatmap_file_path_str);
+
 #else
-  std::ifstream heatmap_file(heatmap_file_path_str);
-  if (!heatmap_file.is_open()) {
-    throw std::runtime_error("Failed to open heatmap file for reading: " + heatmap_file_path_str);
-  }
-  TimerLog restore_timer("Loading matched routes from heatmap.json");
-  nlohmann::json heatmap_json;
-  heatmap_file >> heatmap_json;
-  std::vector<MatchedRoute> matched_routes = heatmap_json.get<std::vector<MatchedRoute>>();
-  restore_timer.stop();
+
+    std::ifstream heatmap_file(heatmap_file_path_str);
+    if (!heatmap_file.is_open()) {
+      throw std::runtime_error("Failed to open heatmap file for reading: " + heatmap_file_path_str);
+    }
+    TimerLog restore_timer("Loading matched routes from heatmap.json");
+    nlohmann::json heatmap_json;
+    heatmap_file >> heatmap_json;
+    matched_routes = heatmap_json.get<std::vector<MatchedRoute>>();
 #endif
+  }
+  std::vector<TileGenerator*> tile_generators;
 
   std::unordered_map<int, std::unique_ptr<AlphaShapeTileGenerator>> alpha_shapes;
   {
     TimerLog alpha_shapes_timer("Generating alpha shapes for radius 4000");
-    alpha_shapes.emplace(4000, std::make_unique<AlphaShapeTileGenerator>(matched_routes, static_cast<double>(4000)));
+    auto it = alpha_shapes.emplace(
+        4000, std::make_unique<AlphaShapeTileGenerator>(matched_routes, static_cast<double>(4000)));
+    tile_generators.push_back(it.first->second.get());
   }
   {
     TimerLog alpha_shapes_timer("Generating alpha shapes for radius 7000");
-    alpha_shapes.emplace(7000, std::make_unique<AlphaShapeTileGenerator>(matched_routes, static_cast<double>(7000)));
+    auto it = alpha_shapes.emplace(
+        7000, std::make_unique<AlphaShapeTileGenerator>(matched_routes, static_cast<double>(7000)));
+    tile_generators.push_back(it.first->second.get());
   }
   {
     TimerLog alpha_shapes_timer("Generating alpha shapes for radius 10000");
-    alpha_shapes.emplace(10000, std::make_unique<AlphaShapeTileGenerator>(matched_routes, static_cast<double>(10000)));
+    auto it = alpha_shapes.emplace(
+        10000, std::make_unique<AlphaShapeTileGenerator>(matched_routes, static_cast<double>(10000)));
+    tile_generators.push_back(it.first->second.get());
   }
   std::mutex alpha_shapes_mutex;
 
@@ -1066,18 +1140,21 @@ int main(int argc, char** argv) {
   std::unordered_map<int, std::unique_ptr<SquadratTileGenerator>> squadrat_tile_generators;
   {
     TimerLog squadrat_tiles_timer("Generating squadrats for radius 1000");
-    squadrat_tile_generators.emplace(
+    auto it = squadrat_tile_generators.emplace(
         1000, std::make_unique<SquadratTileGenerator>(matched_routes, static_cast<double>(1000)));
+    tile_generators.push_back(it.first->second.get());
   }
   {
     TimerLog squadrat_tiles_timer("Generating squadrats for radius 1600");
-    squadrat_tile_generators.emplace(
+    auto it = squadrat_tile_generators.emplace(
         1600, std::make_unique<SquadratTileGenerator>(matched_routes, static_cast<double>(1600)));
+    tile_generators.push_back(it.first->second.get());
   }
   {
     TimerLog squadrat_tiles_timer("Generating squadrats for radius 2000");
-    squadrat_tile_generators.emplace(
+    auto it = squadrat_tile_generators.emplace(
         2000, std::make_unique<SquadratTileGenerator>(matched_routes, static_cast<double>(2000)));
+    tile_generators.push_back(it.first->second.get());
   }
   std::mutex squadrat_tiles_mutex;
 
@@ -1111,6 +1188,7 @@ int main(int argc, char** argv) {
   });
 
   TraversalTileGenerator traversal_tile_generator(matched_routes);
+  tile_generators.push_back(&traversal_tile_generator);
 
   svr.Get(url_path + R"(/traversal/(\d+)/(\d+)/(\d+).png)",
           [&traversal_tile_generator](const httplib::Request& req, httplib::Response& res) {
@@ -1149,12 +1227,59 @@ int main(int argc, char** argv) {
     res.status = httplib::StatusCode::InternalServerError_500;
   });
 
+  auto ingest_thread = std::thread([&tile_generators]() {
+    char* ingest_folder = std::getenv("INGEST_FOLDER");
+    std::string ingest_folder_str(ingest_folder ? ingest_folder : INGEST_FOLDER);
+    std::cout << "Ingest folder: " << ingest_folder_str << std::endl;
+    RouteMatcher ingest_matcher;
+
+    while (true) {
+      std::filesystem::directory_iterator ingest_dir(ingest_folder_str);
+      if (!std::filesystem::exists(ingest_folder_str)) {
+        std::cerr << "Ingest folder does not exist: " << ingest_folder_str << std::endl;
+        std::this_thread::sleep_for(std::chrono::seconds(10));
+        continue;
+      }
+      std::vector<Route> routes;
+      for (const auto& entry : ingest_dir) {
+        // Found new json file
+        if (entry.is_regular_file() && entry.path().extension() == ".json") {
+          std::cout << "Found new file: " << entry.path() << std::endl;
+          nlohmann::json activity_json = nlohmann::json::parse(std::ifstream(entry.path()));
+          Route route;
+          route.name = activity_json.value("name", "");
+          route.date = activity_json.value("start_date", "");
+          route.date_format = 1;
+          std::string polyline = activity_json.at("map").value("polyline", "");
+          route.route = decodePolyline(polyline, 1e5);
+          std::cout << "Ingesting activity: " << route.name << " at time " << route.date << " with "
+                    << route.route.size() << " points" << std::endl;
+          routes.push_back(route);
+
+          // Move to ingested folder
+          std::filesystem::path ingested_folder = ingest_folder_str + "/ingested";
+          if (!std::filesystem::exists(ingested_folder)) {
+            std::filesystem::create_directory(ingested_folder);
+          }
+          std::filesystem::rename(entry.path(), ingested_folder / entry.path().filename());
+        }
+      }
+      if (!routes.empty()) {
+        std::vector<MatchedRoute> matches_routes = ingest_matcher.matchAllRoutes(routes);
+        for (const auto& tile_generator : tile_generators) {
+          tile_generator->addRoutes(matches_routes);
+        }
+      }
+
+      std::this_thread::sleep_for(std::chrono::seconds(5));
+    }
+  });
+
   // Start server
   std::cout << "\n==================================================" << std::endl;
   std::cout << "Route Planning API Server" << std::endl;
   std::cout << "==================================================" << std::endl;
-  std::cout << "Server starting on http://0.0.0.0:9090" << std::endl;
-  svr.listen("0.0.0.0", port);
+  std::cout << "Server starting on http://0.0.0.0:" << port << std::endl;
   std::cout << "  GET /health - Health check" << std::endl;
   std::cout << "  GET /tile?z=0&x=0&y=0&radius=10" << std::endl;
   std::cout << "\nParameters:" << std::endl;
@@ -1163,46 +1288,9 @@ int main(int argc, char** argv) {
   std::cout << "  y       - Tile y coordinate (default: 0)" << std::endl;
   std::cout << "  radius  - Search radius in km (default: 10)" << std::endl;
 
-  svr.listen("0.0.0.0", 9090);
-
+  svr.listen("0.0.0.0", port);
+  if (ingest_thread.joinable()) {
+    ingest_thread.join();
+  }
   return 0;
 }
-
-// ============================================================================
-// Main program
-// ============================================================================
-// int main(int argc, char* argv[]) {
-//   // Print program name
-//   fprintf(stderr, "Witx Heatmap Route Planner\n");
-//   auto routes = load_all_routes();
-//   RouteMatcher matcher;
-//   auto matched_routes = matcher.matchAllRoutes(routes);
-//   // OsmFinder osm_finder("/home/christian/git/witx-heatmap/data/routing/valhalla_data/merged.osm.pbf");
-
-//   fprintf(stderr, "Matched %zu routes out of %zu\n", matched_routes.size(), routes.size());
-
-//   // Count how many times each physical way-segment (Valhalla directed edge) was traversed
-//   // across all matched routes. edge_id is stable across matches as long as the tiles don't
-//   // change, and distinguishes direction, unlike way_id which can be shared by many segments.
-//   std::unordered_map<uint64_t, int> traversal_counts;
-//   for (const auto& matched_route : matched_routes) {
-//     for (const auto& segment : matched_route.way_segments) {
-//       traversal_counts[segment.edge_id]++;
-//     }
-//   }
-
-//   for (const auto& matched_route : matched_routes) {
-//     fprintf(stderr, "Matched route with %zu way segments\n", matched_route.way_segments.size());
-//     for (const auto& segment : matched_route.way_segments) {
-//       fprintf(stderr, "Way %s (edge %llu, traversed %d times): %zu coordinates\n", segment.way_id.c_str(),
-//               static_cast<unsigned long long>(segment.edge_id), traversal_counts[segment.edge_id],
-//               segment.geometry.size());
-//       for (const auto& coord : segment.geometry) {
-//         std::cerr << coord.lat << "," << coord.lon << " ";
-//       }
-//       std::cerr << std::endl;
-//     }
-//     std::cerr << std::endl;
-//   }
-//   std::cerr << std::endl;
-// }
