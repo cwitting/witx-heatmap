@@ -31,7 +31,7 @@
 #define RESTORE 1
 
 // Christian
-#define ROUTE_FILE "/media/christian/Data/Backup/strava/strava_christian_simple.geojson"
+#define ROUTE_FILE "/media/christian/Data/Backup/strava/strava_christian_full.geojson"
 #define HEATMAP_FILE "/home/christian/git/witx-heatmap/data/heatmap.json"
 #define DEFAULT_INGEST_FOLDER "/home/christian/git/witx-heatmap/data/ingest_christian"
 
@@ -544,8 +544,8 @@ class Tile {
     // Traditional Strava heatmap gradient: dark red for lightly traveled pixels, through
     // orange and yellow, up to a white-hot core for the most heavily traveled ones.
     static const std::vector<cv::Scalar> heatmap_colors = {
-        cv::Scalar(0, 0, 139, 255),     // dark red
-        cv::Scalar(0, 0, 255, 255),     // red
+        cv::Scalar(0, 0, 139, 255),  // dark red
+        // cv::Scalar(0, 0, 255, 255),     // red
         cv::Scalar(0, 140, 255, 255),   // orange
         cv::Scalar(0, 255, 255, 255),   // yellow
         cv::Scalar(255, 255, 255, 255)  // white hot core
@@ -574,18 +574,18 @@ class Tile {
         if ((x1 < -8 && x2 < -8) || (x1 > 264 && x2 > 264) || (y1 < -8 && y2 < -8) || (y1 > 264 && y2 > 264)) {
           continue;
         }
-        cv::line(route_mask, cv::Point(x1, y1), cv::Point(x2, y2), cv::Scalar(255), 2, cv::LINE_AA);
+        cv::line(route_mask, cv::Point(x1, y1), cv::Point(x2, y2), cv::Scalar(255), 1, cv::LINE_AA);
         drew_any = true;
       }
       if (drew_any) {
         cv::Mat route_mask_f;
-        route_mask.convertTo(route_mask_f, CV_32FC1, 1.0);
+        route_mask.convertTo(route_mask_f, CV_32FC1, 1.0 / 255.0);
         accumulator += route_mask_f;  // one contribution per route, so overlaps between activities stack
       }
     }
 
     // A small blur gives tracks the soft glow Strava's heatmap tiles have.
-    cv::GaussianBlur(accumulator, accumulator, cv::Size(5, 5), 0);
+    cv::GaussianBlur(accumulator, accumulator, cv::Size(3, 3), 0);
 
     double max_value = 0;
     cv::minMaxLoc(accumulator, nullptr, &max_value);
@@ -606,7 +606,7 @@ class Tile {
         pixel[0] = static_cast<uchar>(color[0]);
         pixel[1] = static_cast<uchar>(color[1]);
         pixel[2] = static_cast<uchar>(color[2]);
-        pixel[3] = static_cast<uchar>(std::clamp(normalized * 400.0, 40.0, 255.0));
+        pixel[3] = static_cast<uchar>(255);
       }
     }
   }
