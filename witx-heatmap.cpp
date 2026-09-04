@@ -984,7 +984,6 @@ class TraversalTileGenerator : public TileGenerator {
     }
     // Sort after visit time and insert in traversal_counts_
     std::scoped_lock<std::shared_mutex> full_lock(shared_mutex_);
-    traversal_counts_.clear();
     for (const auto& [key, segment] : traversal_counts) {
       traversal_counts_.push_back(segment);
     }
