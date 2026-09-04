@@ -540,6 +540,77 @@ class Tile {
     // fprintf(stderr, "Painted %d way segments on tile z=%d, x=%d, y=%d\n", count, z_, x_, y_);
   }
 
+  void paintHeatmap(const std::vector<MatchedRoute>& matched_routes) {
+    // Traditional Strava heatmap gradient: dark red for lightly traveled pixels, through
+    // orange and yellow, up to a white-hot core for the most heavily traveled ones.
+    static const std::vector<cv::Scalar> heatmap_colors = {
+        cv::Scalar(0, 0, 139, 255),     // dark red
+        cv::Scalar(0, 0, 255, 255),     // red
+        cv::Scalar(0, 140, 255, 255),   // orange
+        cv::Scalar(0, 255, 255, 255),   // yellow
+        cv::Scalar(255, 255, 255, 255)  // white hot core
+    };
+
+    // Accumulate per-route coverage in a float buffer so pixels crossed by many different
+    // activities build up brightness, then colorize with the orange-to-white-hot gradient.
+    cv::Mat accumulator(256, 256, CV_32FC1, cv::Scalar(0));
+    cv::Mat route_mask(256, 256, CV_8UC1);
+
+    for (const auto& matched_route : matched_routes) {
+      const auto& route = matched_route.route.route;
+      if (route.size() < 2) {
+        continue;
+      }
+      route_mask.setTo(cv::Scalar(0));
+      bool drew_any = false;
+      for (size_t i = 1; i < route.size(); ++i) {
+        const auto& p1 = route[i - 1];
+        const auto& p2 = route[i];
+        int x1 = static_cast<int>((p1.lon - min_lon_) / (max_lon_ - min_lon_) * 256);
+        int y1 = static_cast<int>((max_lat_ - p1.lat) / (max_lat_ - min_lat_) * 256);
+        int x2 = static_cast<int>((p2.lon - min_lon_) / (max_lon_ - min_lon_) * 256);
+        int y2 = static_cast<int>((max_lat_ - p2.lat) / (max_lat_ - min_lat_) * 256);
+        // Skip segments that clearly miss this tile; cv::line clips the rest for us.
+        if ((x1 < -8 && x2 < -8) || (x1 > 264 && x2 > 264) || (y1 < -8 && y2 < -8) || (y1 > 264 && y2 > 264)) {
+          continue;
+        }
+        cv::line(route_mask, cv::Point(x1, y1), cv::Point(x2, y2), cv::Scalar(255), 2, cv::LINE_AA);
+        drew_any = true;
+      }
+      if (drew_any) {
+        cv::Mat route_mask_f;
+        route_mask.convertTo(route_mask_f, CV_32FC1, 1.0);
+        accumulator += route_mask_f;  // one contribution per route, so overlaps between activities stack
+      }
+    }
+
+    // A small blur gives tracks the soft glow Strava's heatmap tiles have.
+    cv::GaussianBlur(accumulator, accumulator, cv::Size(5, 5), 0);
+
+    double max_value = 0;
+    cv::minMaxLoc(accumulator, nullptr, &max_value);
+    if (max_value <= 0.0) {
+      return;
+    }
+
+    for (int y = 0; y < accumulator.rows; ++y) {
+      for (int x = 0; x < accumulator.cols; ++x) {
+        float value = accumulator.at<float>(y, x);
+        if (value <= 0.0f) {
+          continue;
+        }
+        // Log scale keeps a single pass visible while heavily-traveled pixels saturate towards white.
+        double normalized = std::clamp(std::log1p(value) / std::log1p(max_value), 0.0, 1.0);
+        cv::Scalar color = color_map(normalized, heatmap_colors);
+        auto& pixel = image_data_.at<cv::Vec4b>(y, x);
+        pixel[0] = static_cast<uchar>(color[0]);
+        pixel[1] = static_cast<uchar>(color[1]);
+        pixel[2] = static_cast<uchar>(color[2]);
+        pixel[3] = static_cast<uchar>(std::clamp(normalized * 400.0, 40.0, 255.0));
+      }
+    }
+  }
+
   void paintRoute(const std::vector<MatchedRoute>& matched_routes) {
     int count = 0;
     for (const auto& matched_route : matched_routes) {
@@ -1026,6 +1097,32 @@ class TraversalTileGenerator : public TileGenerator {
   std::vector<WaySegment> traversal_counts_;
 };
 
+class StravaHeatmapTileGenerator : public TileGenerator {
+ public:
+  StravaHeatmapTileGenerator(const std::vector<MatchedRoute>& matched_routes) {
+    addRoutes(matched_routes);
+  }
+
+  void addRoutes(const std::vector<MatchedRoute>& matched_routes) override {
+    std::scoped_lock<std::shared_mutex> full_lock(shared_mutex_);
+    matched_routes_.insert(matched_routes_.end(), matched_routes.begin(), matched_routes.end());
+    clearCache();
+  }
+
+  Tile generateTile(int z, int x, int y) override {
+    Tile tile(z, x, y);
+    {
+      std::shared_lock<std::shared_mutex> shared_lock(shared_mutex_);
+      tile.paintHeatmap(matched_routes_);
+    }
+    return tile;
+  }
+
+ private:
+  std::shared_mutex shared_mutex_;
+  std::vector<MatchedRoute> matched_routes_;
+};
+
 static void persistHeatmap(const std::vector<MatchedRoute>& matched_routes, const std::string& heatmap_file_path_str) {
   nlohmann::json heatmap_json = matched_routes;
   std::ofstream heatmap_file(heatmap_file_path_str);
@@ -1298,6 +1395,28 @@ int main(int argc, char** argv) {
 
             // For now just return a placeholder PNG image (256x256 pixel)
             Tile tile = traversal_tile_generator.getTile(z, x, y);
+            cv::Mat png_data = tile.getImage();
+            std::vector<unsigned char> buffer;
+            cv::imencode(".png", png_data, buffer);
+            res.set_content(reinterpret_cast<const char*>(buffer.data()), buffer.size(), "image/png");
+          });
+
+  StravaHeatmapTileGenerator heatmap_tile_generator(matched_routes);
+  tile_generators.push_back(&heatmap_tile_generator);
+
+  svr.Get(url_path + R"(/heatmap/(\d+)/(\d+)/(\d+).png)",
+          [&heatmap_tile_generator](const httplib::Request& req, httplib::Response& res) {
+            // Heatmap XYZ tile request from url like /heatmap/{z}/{x}/{y}.png
+            for (const auto& param : req.path_params) {
+              fprintf(stderr, "Path param: %s = %s\n", param.first.c_str(), param.second.c_str());
+            }
+            int z = std::stoi(req.matches[1]);
+            int x = std::stoi(req.matches[2]);
+            int y = std::stoi(req.matches[3]);
+            std::string user = req.has_param("user") ? req.get_param_value("user") : "";
+
+            // For now just return a placeholder PNG image (256x256 pixel)
+            Tile tile = heatmap_tile_generator.getTile(z, x, y);
             cv::Mat png_data = tile.getImage();
             std::vector<unsigned char> buffer;
             cv::imencode(".png", png_data, buffer);
