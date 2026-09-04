@@ -52,7 +52,25 @@ struct Coordinate {
 
 NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE(Coordinate, lat, lon)
 
-// using Route = std::vector<Coordinate>;
+// Simplify a coordinate sequence by dropping points too close to the last kept point (lon/lat distance only).
+static std::vector<Coordinate> simplifyCoordinates(const std::vector<Coordinate>& coords, double tolerance = 0.001) {
+  if (coords.size() < 2) {
+    return coords;
+  }
+
+  std::vector<Coordinate> simplified{coords[0]};
+  for (std::size_t i = 1; i < coords.size(); ++i) {
+    const auto& last = simplified.back();
+    const auto& coord = coords[i];
+    double dist =
+        std::sqrt((coord.lon - last.lon) * (coord.lon - last.lon) + (coord.lat - last.lat) * (coord.lat - last.lat));
+    if (dist > tolerance) {
+      simplified.push_back(coord);
+    }
+  }
+
+  return simplified;
+}
 
 constexpr double MILLISECONDS_PER_DAY = 24 * 60 * 60 * 1000;
 
@@ -366,7 +384,9 @@ class AlphaShape {
       */
       matched_routes_.push_back(matched_route);
 
-      for (const auto& coord : matched_route.route.route) {
+      auto simplified_route = simplifyCoordinates(matched_route.route.route);
+
+      for (const auto& coord : simplified_route) {
         points_.emplace_back(coord.lat, coord.lon);
       }
     }
