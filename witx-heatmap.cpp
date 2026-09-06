@@ -601,7 +601,11 @@ class Tile {
       cv::GaussianBlur(accumulator, accumulator, cv::Size(kernel_size, kernel_size), 0);
     }
 
-    double max_value = std::max(max_density, 1.0);
+    constexpr double max_value = 50;
+    // cv::minMaxLoc(accumulator, nullptr, &max_value);
+    // if (max_value <= 0.0) {
+    //   return;
+    // }
 
     for (int y = 0; y < accumulator.rows; ++y) {
       for (int x = 0; x < accumulator.cols; ++x) {
