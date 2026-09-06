@@ -48,6 +48,9 @@
 struct Coordinate {
   double lat{};
   double lon{};
+  bool isValid() const {
+    return lat >= -90.0 && lat <= 90.0 && lon >= -180.0 && lon <= 180.0;
+  }
 };
 
 NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE(Coordinate, lat, lon)
@@ -387,6 +390,9 @@ class AlphaShape {
       auto simplified_route = simplifyCoordinates(matched_route.route.route);
 
       for (const auto& coord : simplified_route) {
+        if (!coord.isValid()) {
+          continue;
+        }
         points_.emplace_back(coord.lat, coord.lon);
       }
     }
@@ -406,17 +412,19 @@ class AlphaShape {
     // Project to planar meters so the alpha radius test means the same thing everywhere.
     std::vector<cv::Point2f> projected;
     projected.reserve(points_.size());
-    double min_x = std::numeric_limits<double>::max();
-    double min_y = std::numeric_limits<double>::max();
-    double max_x = std::numeric_limits<double>::lowest();
-    double max_y = std::numeric_limits<double>::lowest();
+    float min_x = std::numeric_limits<float>::max();
+    float min_y = std::numeric_limits<float>::max();
+    float max_x = std::numeric_limits<float>::lowest();
+    float max_y = std::numeric_limits<float>::lowest();
     for (const auto& [lat, lon] : points_) {
       auto [x, y] = latLonToMeters(lat, lon);
-      min_x = std::min(min_x, x);
-      min_y = std::min(min_y, y);
-      max_x = std::max(max_x, x);
-      max_y = std::max(max_y, y);
-      projected.emplace_back(static_cast<float>(x), static_cast<float>(y));
+      float fx = static_cast<float>(x);
+      float fy = static_cast<float>(y);
+      min_x = std::min(min_x, fx);
+      min_y = std::min(min_y, fy);
+      max_x = std::max(max_x, fx);
+      max_y = std::max(max_y, fy);
+      projected.emplace_back(fx, fy);
     }
 
     // Subdiv2D requires a rect that strictly contains every inserted point.
