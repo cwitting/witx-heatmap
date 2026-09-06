@@ -30,18 +30,22 @@
 #define VALHALLA_CONFIG_FILE "/home/christian/git/witx-heatmap/data/routing/valhalla_data/valhalla.json"
 #define RESTORE 1
 
+const std::set<std::string> activity_id_blacklist = {
+    "5055464955",
+};
+
 // Christian
 #define ROUTE_FILE "/media/christian/Data/Backup/strava/strava_christian_full.geojson"
-#define HEATMAP_FILE "/home/christian/git/witx-heatmap/data/heatmap.json"
+#define HEATMAP_FILE "/media/christian/Data/Backup/strava/heatmap_christian.json"
 #define DEFAULT_INGEST_FOLDER "/home/christian/git/witx-heatmap/data/ingest_christian"
 
 // Thomas
-// #define ROUTE_FILE "/media/christian/Data/Backup/strava/strava_thomas_simple.geojson"
-// #define HEATMAP_FILE "/home/christian/git/witx-heatmap/data/heatmap_thomas.json"
+// #define ROUTE_FILE "/media/christian/Data/Backup/strava/strava_thomas_full.geojson"
+// #define HEATMAP_FILE "/media/christian/Data/Backup/strava/heatmap_thomas.json"
 // #define DEFAULT_INGEST_FOLDER "/home/christian/git/witx-heatmap/data/ingest_thomas"
 
 // Nikolaj
-// #define ROUTE_FILE "/media/christian/Data/Backup/strava/strava_nikolaj_simple.geojson"
+// #define ROUTE_FILE "/media/christian/Data/Backup/strava/strava_nikolaj_full.geojson"
 // #define HEATMAP_FILE "/home/christian/git/witx-heatmap/data/heatmap_nikolaj.json"
 // #define DEFAULT_INGEST_FOLDER "/home/christian/git/witx-heatmap/data/ingest_nikolaj"
 
@@ -102,6 +106,7 @@ cv::Scalar color_map(double value, std::vector<cv::Scalar> colors) {
 
 struct Route {
   std::string link;
+  std::string activity_id;
   std::string name;
   std::string date;
   int date_format{};
@@ -125,7 +130,7 @@ struct Route {
   }
 };
 
-NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE(Route, link, name, date, route)
+NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE(Route, link, activity_id, name, date, route)
 
 struct WaySegment {
   std::string way_id;
@@ -787,6 +792,11 @@ std::vector<Route> load_all_routes() {
 
     Route route;
     route.link = feature["properties"]["link"];
+    route.activity_id = feature["properties"]["activity_id"];
+    if (activity_id_blacklist.end() !=
+        std::find(activity_id_blacklist.begin(), activity_id_blacklist.end(), route.activity_id)) {
+      continue;
+    }
     route.name = feature["properties"]["name"];
     route.date = feature["properties"]["date"];
     for (const auto& point : geometry["coordinates"]) {
