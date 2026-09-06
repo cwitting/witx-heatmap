@@ -22,7 +22,6 @@
 #include <stdexcept>
 #include <tuple>
 #include <unordered_map>
-#include <unordered_set>
 #include <vector>
 
 #include "httplib.h"
@@ -541,10 +540,7 @@ class Tile {
     // fprintf(stderr, "Painted %d way segments on tile z=%d, x=%d, y=%d\n", count, z_, x_, y_);
   }
 
-  // max_density must come from the tile generator (shared across every tile at this zoom), not be
-  // computed from this tile's own pixels, otherwise neighboring tiles normalize differently and
-  // show visible seams at their shared border.
-  void paintHeatmap(const std::vector<MatchedRoute>& matched_routes, double max_density) {
+  void paintHeatmap(const std::vector<MatchedRoute>& matched_routes) {
     // Traditional Strava heatmap gradient: dark red for lightly traveled pixels, through
     // orange and yellow, up to a white-hot core for the most heavily traveled ones.
     static const std::vector<cv::Scalar> heatmap_colors = {
@@ -1112,98 +1108,21 @@ class StravaHeatmapTileGenerator : public TileGenerator {
   void addRoutes(const std::vector<MatchedRoute>& matched_routes) override {
     std::scoped_lock<std::shared_mutex> full_lock(shared_mutex_);
     matched_routes_.insert(matched_routes_.end(), matched_routes.begin(), matched_routes.end());
-    {
-      std::lock_guard<std::mutex> density_lock(density_mutex_);
-      zoom_max_density_.clear();
-    }
     clearCache();
   }
 
   Tile generateTile(int z, int x, int y) override {
     Tile tile(z, x, y);
-    double max_density = getOrComputeMaxDensity(z);
     {
-      // Shared (read-only) lock so concurrent tile requests can render in parallel; only
-      // getOrComputeMaxDensity below ever needs exclusive access, and only once per zoom.
       std::shared_lock<std::shared_mutex> shared_lock(shared_mutex_);
-      tile.paintHeatmap(matched_routes_, max_density);
+      tile.paintHeatmap(matched_routes_);
     }
     return tile;
   }
 
  private:
-  // Reference count of how many distinct routes pass through the same map cell, using a cell size
-  // equal to one output pixel at this zoom, so it's directly comparable to a tile's own pixel
-  // accumulator. Cached per zoom so every tile at that zoom shares one normalization reference.
-  // Zoom is capped since cell size (and thus overlap counts) barely changes once cells get
-  // smaller than GPS/path noise, and finer cells make the per-segment scan below much slower.
-  double getOrComputeMaxDensity(int z) {
-    int density_zoom = std::min(z, kMaxDensityZoom);
-    {
-      std::lock_guard<std::mutex> density_lock(density_mutex_);
-      auto it = zoom_max_density_.find(density_zoom);
-      if (it != zoom_max_density_.end()) {
-        return it->second;
-      }
-    }
-    double max_density;
-    {
-      // Only needs read access to matched_routes_, so other tiles/computations can proceed too.
-      std::shared_lock<std::shared_mutex> shared_lock(shared_mutex_);
-      max_density = computeMaxDensity(density_zoom);
-    }
-    std::lock_guard<std::mutex> density_lock(density_mutex_);
-    zoom_max_density_[density_zoom] = max_density;
-    return max_density;
-  }
-
-  static constexpr int kMaxDensityZoom = 16;
-
-  double computeMaxDensity(int z) const {
-    constexpr double WORLD_WIDTH_METERS = 20037508.34 * 2.0;
-    double cell_size = WORLD_WIDTH_METERS / (256.0 * std::pow(2.0, z));
-
-    auto cell_key = [](int64_t col, int64_t row) {
-      return (static_cast<uint64_t>(static_cast<uint32_t>(col)) << 32) | static_cast<uint32_t>(row);
-    };
-
-    std::unordered_map<uint64_t, int> cell_counts;
-    for (const auto& matched_route : matched_routes_) {
-      const auto& route = matched_route.route.route;
-      if (route.size() < 2) {
-        continue;
-      }
-      // Count each route once per cell it crosses, so a cell's count means "this many different
-      // routes passed through here", matching what the per-tile accumulator sums up to.
-      std::unordered_set<uint64_t> visited_cells;
-      for (size_t i = 1; i < route.size(); ++i) {
-        auto [x1, y1] = latLonToMeters(route[i - 1].lat, route[i - 1].lon);
-        auto [x2, y2] = latLonToMeters(route[i].lat, route[i].lon);
-        double length = std::hypot(x2 - x1, y2 - y1);
-        int steps = std::max(1, static_cast<int>(length / cell_size) + 1);
-        for (int s = 0; s <= steps; ++s) {
-          double t = static_cast<double>(s) / steps;
-          int64_t col = static_cast<int64_t>(std::floor((x1 + (x2 - x1) * t) / cell_size));
-          int64_t row = static_cast<int64_t>(std::floor((y1 + (y2 - y1) * t) / cell_size));
-          visited_cells.insert(cell_key(col, row));
-        }
-      }
-      for (uint64_t key : visited_cells) {
-        ++cell_counts[key];
-      }
-    }
-
-    int max_count = 1;
-    for (const auto& [key, count] : cell_counts) {
-      max_count = std::max(max_count, count);
-    }
-    return static_cast<double>(max_count);
-  }
-
   std::shared_mutex shared_mutex_;
   std::vector<MatchedRoute> matched_routes_;
-  std::mutex density_mutex_;
-  std::unordered_map<int, double> zoom_max_density_;
 };
 
 static void persistHeatmap(const std::vector<MatchedRoute>& matched_routes, const std::string& heatmap_file_path_str) {
