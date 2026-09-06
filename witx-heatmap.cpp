@@ -1355,6 +1355,12 @@ int main(int argc, char** argv) {
 
   std::unordered_map<int, std::unique_ptr<SquadratTileGenerator>> squadrat_tile_generators;
   {
+    TimerLog squadrat_tiles_timer("Generating squadrats for radius 500");
+    auto it = squadrat_tile_generators.emplace(
+        500, std::make_unique<SquadratTileGenerator>(matched_routes, static_cast<double>(500)));
+    tile_generators.push_back(it.first->second.get());
+  }
+  {
     TimerLog squadrat_tiles_timer("Generating squadrats for radius 1000");
     auto it = squadrat_tile_generators.emplace(
         1000, std::make_unique<SquadratTileGenerator>(matched_routes, static_cast<double>(1000)));
