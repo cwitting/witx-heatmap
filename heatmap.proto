@@ -13,6 +13,7 @@ message PRoute {
   string name = 3;
   string date = 4;
   repeated PCoordinate route = 5;
+  string athlete_id = 6;
 }
 
 message PWaySegment {

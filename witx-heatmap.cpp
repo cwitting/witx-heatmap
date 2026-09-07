@@ -36,6 +36,10 @@ const std::set<std::string> activity_id_blacklist = {
 
 #define DEFAULT_DATA_DIR "/media/christian/Data/Backup/strava/heatmap_data"
 
+#define CHRISTIAN_ID "16938953"
+#define NIKOLAJ_ID "38458035"
+#define THOMAS_ID "79701175"
+
 static std::string getDataDir() {
   char* data_dir = std::getenv("DATA_DIR");
   return data_dir ? data_dir : DEFAULT_DATA_DIR;
@@ -83,6 +87,12 @@ static std::vector<cv::Scalar> default_colors = {
     cv::Scalar(0, 0, 255, 130)     // red
 };
 
+static std::unordered_map<std::string, cv::Scalar> user_colors = {
+    {CHRISTIAN_ID, cv::Scalar(0, 255, 0, 130)},  // green
+    {NIKOLAJ_ID, cv::Scalar(255, 0, 0, 130)},    // blue
+    {THOMAS_ID, cv::Scalar(0, 0, 255, 130)}      // red
+};
+
 cv::Scalar color_map(double value, std::vector<cv::Scalar> colors) {
   if (colors.empty()) {
     return cv::Scalar(0, 0, 0, 200);  // default to black if no colors provided
@@ -98,6 +108,7 @@ cv::Scalar color_map(double value, std::vector<cv::Scalar> colors) {
 
 struct Route {
   std::string link;
+  std::string athlete_id;
   std::string activity_id;
   std::string name;
   std::string date;
@@ -122,7 +133,7 @@ struct Route {
   }
 };
 
-NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE(Route, link, activity_id, name, date, date_format, route)
+NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE(Route, link, athlete_id, activity_id, name, date, date_format, route)
 
 struct WaySegment {
   std::string way_id;
@@ -229,6 +240,7 @@ struct SquadratTile {
   double tile_size{};  // Circumradius (center to corner) of the hexagon in corrected meters
   mutable double first_visit_time{};
   mutable double last_visit_time{};
+  mutable std::string last_athlete_id{};
 
   bool operator<(const SquadratTile& other) const {
     return std::tie(squadrat_q, squadrat_r) < std::tie(other.squadrat_q, other.squadrat_r);
@@ -246,12 +258,13 @@ struct SquadratTile {
     this->tile_size = tile_size;
   }
 
-  void visit(double time) const {
+  void visit(const std::string& athlete_id, double time) const {
     if (first_visit_time == 0 || time < first_visit_time) {
       first_visit_time = time;
     }
     if (time > last_visit_time) {
       last_visit_time = time;
+      last_athlete_id = athlete_id;
     }
   }
 
@@ -261,6 +274,10 @@ struct SquadratTile {
 
   double getLastVisitTime() const {
     return last_visit_time;
+  }
+
+  const std::string& getLastAthleteId() const {
+    return last_athlete_id;
   }
 
   double getFirstVisitAge() const {
@@ -282,6 +299,14 @@ struct SquadratTile {
   cv::Scalar getLastVisitColor() const {
     double age = std::min(1.0, getLastVisitAge() / AGE_THRESHOLD);
     return color_map(age, default_colors);
+  }
+
+  cv::Scalar getOwnerColor() const {
+    auto it = user_colors.find(last_athlete_id);
+    if (it != user_colors.end()) {
+      return it->second;
+    }
+    return cv::Scalar(128, 128, 128, 130);  // default color if not found
   }
 
   // Get the 6 corners of the hexagon in lat/lon degrees
@@ -329,7 +354,8 @@ struct SquadratTile {
   }
 };
 
-NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE(SquadratTile, squadrat_q, squadrat_r, tile_size, first_visit_time, last_visit_time)
+NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE(SquadratTile, squadrat_q, squadrat_r, tile_size, first_visit_time, last_visit_time,
+                                   last_athlete_id)
 
 struct MatchedRoute {
   Route route;
@@ -341,6 +367,7 @@ NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE(MatchedRoute, route, way_segments)
 static witxheatmap::PRoute routeToProto(const Route& route) {
   witxheatmap::PRoute proto;
   proto.set_link(route.link);
+  proto.set_athlete_id(route.athlete_id);
   proto.set_activity_id(route.activity_id);
   proto.set_name(route.name);
   proto.set_date(route.date);
@@ -356,6 +383,7 @@ static Route routeFromProto(const witxheatmap::PRoute& proto) {
   Route route;
   route.link = proto.link();
   route.activity_id = proto.activity_id();
+  route.athlete_id = proto.athlete_id();
   route.name = proto.name();
   route.date = proto.date();
   route.route.reserve(proto.route_size());
@@ -744,6 +772,24 @@ class Tile {
     }
   }
 
+  void paintCTF(const std::set<SquadratTile>& squadrat_tiles) {
+    for (const auto& tile : squadrat_tiles) {
+      auto polygon = hexToPixelPolygon(tile.getVertices());
+      cv::fillConvexPoly(image_data_, polygon, tile.getOwnerColor(), cv::LINE_AA);
+      // Print the age at the hex's centroid
+      cv::Point center(0, 0);
+      for (const auto& p : polygon) {
+        center += p;
+      }
+      center.x = center.x / static_cast<int>(polygon.size()) - 10;  // Center + shift text to be centered
+      center.y = center.y / static_cast<int>(polygon.size()) + 5;
+      if (z_ >= 11) {
+        cv::putText(image_data_, std::to_string((int)tile.getLastVisitAge()) + "d", center, cv::FONT_HERSHEY_SIMPLEX,
+                    0.4, cv::Scalar(0, 0, 0, 255), 1, cv::LINE_AA);
+      }
+    }
+  }
+
   void paint(const AlphaShape& alpha_shape) {
     // paintRoute(alpha_shape.getMatchedRoutes());
     for (const auto& [p1, p2] : alpha_shape.getBoundaryEdges()) {
@@ -1087,7 +1133,7 @@ class SquadratTileGenerator : public TileGenerator {
       for (const auto& coordinate : matched_route.route.route) {
         std::scoped_lock<std::shared_mutex> full_lock(shared_mutex_);
         auto it = squadrat_tiles_.emplace(coordinate.lat, coordinate.lon, tile_size_);
-        it.first->visit(visit_time);
+        it.first->visit(matched_route.route.athlete_id, visit_time);
       }
     }
     clearCache();
@@ -1103,10 +1149,23 @@ class SquadratTileGenerator : public TileGenerator {
     return tile;
   }
 
- private:
+ protected:
   std::shared_mutex shared_mutex_;
   std::set<SquadratTile> squadrat_tiles_;
   double tile_size_;
+};
+
+class CTFTileGenerator : public SquadratTileGenerator {
+  using SquadratTileGenerator::SquadratTileGenerator;
+  Tile generateTile(int z, int x, int y) override {
+    Tile tile(z, x, y);
+    {
+      std::shared_lock<std::shared_mutex> shared_lock(shared_mutex_);
+      tile.paintCTF(squadrat_tiles_);
+    }
+    tile.paintGrid(tile_size_);
+    return tile;
+  }
 };
 
 class TraversalTileGenerator : public TileGenerator {
@@ -1224,6 +1283,9 @@ class ActivityIngester {
         nlohmann::json activity_json = nlohmann::json::parse(std::ifstream(entry.path()));
         Route route;
         route.name = activity_json.value("name", "");
+        route.activity_id = activity_json.value("id_str", "");
+        route.link = "https://www.strava.com/activities/" + route.activity_id;
+        route.athlete_id = activity_json["athlete"].value("id_str", "");
         route.date = activity_json.value("start_date", "");
         route.date_format = 1;
         std::string polyline = activity_json.at("map").value("polyline", "");
@@ -1285,6 +1347,48 @@ class User {
   std::string id;
 
   User(const std::string& name, const std::string& id) : name(name), id(id) {
+    std::cout << "Loading OSM data from data/zealand.pbf..." << std::endl;
+
+    // Print program name
+    fprintf(stderr, "Witx Heatmap Route Planner\n");
+
+    std::string heatmap_file_path_str = getHeatmapFile();
+
+    {
+#if !RESTORE
+      auto routes = load_all_routes();
+      RouteMatcher matcher;
+      matched_routes = matcher.matchAllRoutes(routes);
+      persistHeatmap(matched_routes, heatmap_file_path_str);
+
+#else
+
+      std::ifstream heatmap_file(heatmap_file_path_str, std::ios::binary);
+      if (!heatmap_file.is_open()) {
+        throw std::runtime_error("Failed to open heatmap file for reading: " + heatmap_file_path_str);
+      }
+      TimerLog restore_timer("Loading matched routes from heatmap file");
+      witxheatmap::PHeatmap heatmap_proto;
+      if (!heatmap_proto.ParseFromIstream(&heatmap_file)) {
+        throw std::runtime_error("Failed to parse heatmap file: " + heatmap_file_path_str);
+      }
+      matched_routes.reserve(heatmap_proto.matched_routes_size());
+      for (const auto& proto_matched_route : heatmap_proto.matched_routes()) {
+        matched_routes.push_back(matchedRouteFromProto(proto_matched_route));
+      }
+#endif
+    }
+  }
+
+  // REMEMBER TO HANDLE INGESTER TOO
+  User(std::list<User>& users) {
+    name = "Coop";
+    for (const auto& user : users) {
+      fprintf(stderr, "Merging %ld routes from user: %s\n", user.getMatchedRoutes().size(), user.name.c_str());
+      fprintf(stderr, "Current total matched routes: %ld\n", matched_routes.size());
+      matched_routes.insert(matched_routes.end(), user.getMatchedRoutes().begin(), user.getMatchedRoutes().end());
+    }
+    has_coop_endpoints_ = true;
   }
 
   std::string getHeatmapFile() const {
@@ -1322,6 +1426,7 @@ class User {
       Route route;
       route.link = feature["properties"]["link"];
       route.activity_id = feature["properties"]["activity_id"];
+      route.athlete_id = id;
       if (activity_id_blacklist.end() !=
           std::find(activity_id_blacklist.begin(), activity_id_blacklist.end(), route.activity_id)) {
         continue;
@@ -1339,38 +1444,6 @@ class User {
   }
 
   void create(httplib::Server& svr) {
-    std::cout << "Loading OSM data from data/zealand.pbf..." << std::endl;
-
-    // Print program name
-    fprintf(stderr, "Witx Heatmap Route Planner\n");
-
-    std::string heatmap_file_path_str = getHeatmapFile();
-
-    {
-#if !RESTORE
-      auto routes = load_all_routes();
-      RouteMatcher matcher;
-      matched_routes = matcher.matchAllRoutes(routes);
-      persistHeatmap(matched_routes, heatmap_file_path_str);
-
-#else
-
-      std::ifstream heatmap_file(heatmap_file_path_str, std::ios::binary);
-      if (!heatmap_file.is_open()) {
-        throw std::runtime_error("Failed to open heatmap file for reading: " + heatmap_file_path_str);
-      }
-      TimerLog restore_timer("Loading matched routes from heatmap file");
-      witxheatmap::PHeatmap heatmap_proto;
-      if (!heatmap_proto.ParseFromIstream(&heatmap_file)) {
-        throw std::runtime_error("Failed to parse heatmap file: " + heatmap_file_path_str);
-      }
-      matched_routes.reserve(heatmap_proto.matched_routes_size());
-      for (const auto& proto_matched_route : heatmap_proto.matched_routes()) {
-        matched_routes.push_back(matchedRouteFromProto(proto_matched_route));
-      }
-#endif
-    }
-
     {
       TimerLog alpha_shapes_timer("Generating alpha shapes for radius 4000");
       auto it = alpha_shapes.emplace(
@@ -1518,10 +1591,51 @@ class User {
               res.set_content(reinterpret_cast<const char*>(buffer.data()), buffer.size(), "image/png");
             });
 
+    if (has_coop_endpoints_) {
+      {
+        TimerLog ctf_tiles_timer("Generating ctfs for radius 1000");
+        auto it = ctf_tile_generators.emplace(
+            1000, std::make_unique<CTFTileGenerator>(matched_routes, static_cast<double>(1000)));
+        tile_generators_.push_back(ctf_tile_generators.find(1000)->second.get());
+      }
+
+      svr.Get(url_path + R"(/ctf/(\d+)/(\d+)/(\d+).png)", [this](const httplib::Request& req, httplib::Response& res) {
+        // Heatmap XYZ tile request from url like /tiles/{z}/{x}/{y}.png
+        for (const auto& param : req.path_params) {
+          fprintf(stderr, "Path param: %s = %s\n", param.first.c_str(), param.second.c_str());
+        }
+        int z = std::stoi(req.matches[1]);
+        int x = std::stoi(req.matches[2]);
+        int y = std::stoi(req.matches[3]);
+        std::string user = req.has_param("user") ? req.get_param_value("user") : "";
+        int radius = req.has_param("radius") ? std::stoi(req.get_param_value("radius")) : 0;
+        // fprintf(stderr, "Received tile request for z=%d, x=%d, y=%d\n", z, x, y);
+
+        // For now just return a placeholder PNG image (256x256 pixel)
+        auto it = ctf_tile_generators.find(radius);
+        if (it == ctf_tile_generators.end()) {
+          std::lock_guard<std::mutex> lock(squadrat_tiles_mutex);
+          it = ctf_tile_generators
+                   .emplace(radius, std::make_unique<CTFTileGenerator>(matched_routes, static_cast<double>(radius)))
+                   .first;
+        }
+        Tile tile = it->second->getTile(z, x, y);
+        cv::Mat png_data = tile.getImage();
+        std::vector<unsigned char> buffer;
+        cv::imencode(".png", png_data, buffer);
+        res.set_content(reinterpret_cast<const char*>(buffer.data()), buffer.size(), "image/png");
+      });
+    }
+
     ingester_ = std::make_unique<ActivityIngester>(getIngestFolder(), tile_generators_);
   }
 
+  const std::vector<MatchedRoute>& getMatchedRoutes() const {
+    return matched_routes;
+  }
+
  private:
+  bool has_coop_endpoints_ = false;
   std::unique_ptr<ActivityIngester> ingester_;
   std::vector<MatchedRoute> matched_routes;
   std::mutex alpha_shapes_mutex;
@@ -1529,6 +1643,9 @@ class User {
 
   std::unordered_map<int, std::unique_ptr<SquadratTileGenerator>> squadrat_tile_generators;
   std::mutex squadrat_tiles_mutex;
+
+  std::unordered_map<int, std::unique_ptr<CTFTileGenerator>> ctf_tile_generators;
+  std::mutex ctf_tiles_mutex;
 
   std::unique_ptr<TraversalTileGenerator> traversal_tile_generator;
 
@@ -1581,13 +1698,16 @@ int main(int argc, char** argv) {
   });
 
   std::list<User> users;
-  users.emplace_back("Christian", "16938953");
-  // users.emplace_back("Nikolaj", "38458035");
-  // users.emplace_back("Thomas", "79701175");
+  users.emplace_back("Christian", CHRISTIAN_ID);
+  users.emplace_back("Nikolaj", NIKOLAJ_ID);
+  users.emplace_back("Thomas", THOMAS_ID);
 
   for (auto& user : users) {
     user.create(svr);
   }
+
+  User all_users(users);
+  all_users.create(svr);
 
   // Start server
   std::cout << "\n==================================================" << std::endl;
