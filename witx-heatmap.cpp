@@ -1322,7 +1322,6 @@ class ActivityIngester {
   ActivityIngester(const std::string& ingest_folder, const std::vector<TileGenerator*>& tile_generators)
       : tile_generators_(tile_generators) {
     ingest_folder_str_ = ingest_folder;
-    start();
   }
 
   ~ActivityIngester() {
@@ -1742,6 +1741,12 @@ class User {
     }
   }
 
+  void startIngestor() {
+    if (ingester_) {
+      ingester_->start();
+    }
+  }
+
   const std::vector<MatchedRoute>& getMatchedRoutes() const {
     return matched_routes;
   }
@@ -1827,6 +1832,10 @@ int main(int argc, char** argv) {
 
   User all_users(users);
   all_users.create(svr);
+
+  for (auto& user : users) {
+    user.startIngestor();
+  }
 
   // Start server
   std::cout << "\n==================================================" << std::endl;
