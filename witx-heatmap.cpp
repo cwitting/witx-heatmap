@@ -1,5 +1,6 @@
 // #include <omp.h>
 
+#include <omp.h>
 #include <valhalla/config.h>
 #include <valhalla/tyr/actor.h>
 
@@ -948,11 +949,17 @@ class RouteMatcher {
     TimerLog timer("Valhalla initialization");
     const auto& config = valhalla::config(valhalla_config_file_str);
     // auto_cleanup releases the loki/thor/odin workers' caches between calls.
-    actor_ = std::make_unique<valhalla::tyr::actor_t>(config, /*auto_cleanup=*/true);
+    actors_.emplace_back(config, /*auto_cleanup=*/true);
+    actors_.emplace_back(config, /*auto_cleanup=*/true);
+    actors_.emplace_back(config, /*auto_cleanup=*/true);
+    actors_.emplace_back(config, /*auto_cleanup=*/true);
+    actors_.emplace_back(config, /*auto_cleanup=*/true);
+    actors_.emplace_back(config, /*auto_cleanup=*/true);
+    actors_.emplace_back(config, /*auto_cleanup=*/true);
   }
 
   // Match routes to the road network using Valhalla's trace_route (map matching)
-  MatchedRoute matchRoute(const Route& route) {
+  MatchedRoute matchRoute(valhalla::tyr::actor_t& actor, const Route& route) {
     nlohmann::json request;
     request["costing"] = "pedestrian";
     request["shape_match"] = "map_snap";
@@ -967,7 +974,7 @@ class RouteMatcher {
     valhalla::Api api;
     std::string json_str;
     try {
-      json_str = actor_->trace_route(request.dump(), nullptr, &api);
+      json_str = actor.trace_route(request.dump(), nullptr, &api);
     } catch (const std::exception& e) {
       fprintf(stderr, "Valhalla trace_route failed: %s\n", e.what());
       return matched_route;
@@ -1002,18 +1009,20 @@ class RouteMatcher {
 
   std::vector<MatchedRoute> matchAllRoutes(const std::vector<Route>& routes) {
     std::vector<MatchedRoute> matched_routes;
-    int matched_count = 0;
-    int total_count = 0;
-    matched_routes.reserve(routes.size());
-    for (const auto& route : routes) {
+    std::atomic<int> matched_count = 0;
+    std::atomic<int> total_count = 0;
+    matched_routes.resize(routes.size());
+#pragma omp parallel for num_threads(7)
+    for (std::size_t i = 0; i < routes.size(); ++i) {
+      const auto& route = routes[i];
       TimerLog timer("Matching route " + std::to_string(matched_count + 1) + "/" + std::to_string(total_count + 1) +
                      "/" + std::to_string(routes.size()));
-      auto matched_route = matchRoute(route);
+      auto matched_route = matchRoute(actors_[omp_get_thread_num()], route);
       total_count++;
       if (matched_route.way_segments.empty()) {
         fprintf(stderr, "Route matching failed for: %s, %s\n", route.name.c_str(), route.link.c_str());
       }
-      matched_routes.push_back(std::move(matched_route));
+      matched_routes[i] = std::move(matched_route);
       matched_count++;
       // if (matched_count >= 300) {
       //   break;
@@ -1023,7 +1032,7 @@ class RouteMatcher {
   }
 
  private:
-  std::unique_ptr<valhalla::tyr::actor_t> actor_;
+  std::vector<valhalla::tyr::actor_t> actors_;
 };
 
 class TileKey {
