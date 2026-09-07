@@ -1,5 +1,3 @@
-// #include <omp.h>
-
 #include <omp.h>
 #include <valhalla/config.h>
 #include <valhalla/tyr/actor.h>
@@ -30,26 +28,18 @@
 #include "json.hpp"
 
 #define VALHALLA_CONFIG_FILE "/home/christian/git/witx-heatmap/data/routing/valhalla_data/valhalla.json"
-#define RESTORE 0
+#define RESTORE 1
 
 const std::set<std::string> activity_id_blacklist = {
     "5055464955",
 };
 
-// Christian
-#define ROUTE_FILE "/media/christian/Data/Backup/strava/strava_christian_full.geojson"
-#define HEATMAP_FILE "/media/christian/Data/Backup/strava/heatmap_christian.pb"
-#define DEFAULT_INGEST_FOLDER "/home/christian/git/witx-heatmap/data/ingest_christian"
+#define DEFAULT_DATA_DIR "/media/christian/Data/Backup/strava/heatmap_data"
 
-// Thomas
-// #define ROUTE_FILE "/media/christian/Data/Backup/strava/strava_thomas_full.geojson"
-// #define HEATMAP_FILE "/media/christian/Data/Backup/strava/heatmap_thomas.pb"
-// #define DEFAULT_INGEST_FOLDER "/home/christian/git/witx-heatmap/data/ingest_thomas"
-
-// Nikolaj
-// #define ROUTE_FILE "/media/christian/Data/Backup/strava/strava_nikolaj_full.geojson"
-// #define HEATMAP_FILE "/home/christian/git/witx-heatmap/data/heatmap_nikolaj.pb"
-// #define DEFAULT_INGEST_FOLDER "/home/christian/git/witx-heatmap/data/ingest_nikolaj"
+static std::string getDataDir() {
+  char* data_dir = std::getenv("DATA_DIR");
+  return data_dir ? data_dir : DEFAULT_DATA_DIR;
+}
 
 struct Coordinate {
   double lat{};
@@ -132,7 +122,7 @@ struct Route {
   }
 };
 
-NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE(Route, link, activity_id, name, date, route)
+NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE(Route, link, activity_id, name, date, date_format, route)
 
 struct WaySegment {
   std::string way_id;
@@ -843,41 +833,6 @@ class Tile {
   double max_lon_;
 };
 
-std::vector<Route> load_all_routes() {
-  std::vector<Route> routes;
-
-  std::ifstream file(ROUTE_FILE);
-  if (!file.is_open()) {
-    throw std::runtime_error("Failed to open route file: " ROUTE_FILE);
-  }
-
-  nlohmann::json doc;
-  file >> doc;
-
-  for (const auto& feature : doc["features"]) {
-    const auto& geometry = feature["geometry"];
-    if (geometry["type"].get<std::string>() != "LineString") {
-      continue;
-    }
-
-    Route route;
-    route.link = feature["properties"]["link"];
-    route.activity_id = feature["properties"]["activity_id"];
-    if (activity_id_blacklist.end() !=
-        std::find(activity_id_blacklist.begin(), activity_id_blacklist.end(), route.activity_id)) {
-      continue;
-    }
-    route.name = feature["properties"]["name"];
-    route.date = feature["properties"]["date"];
-    for (const auto& point : geometry["coordinates"]) {
-      // GeoJSON coordinates are [lon, lat]
-      route.route.push_back(Coordinate{point[1].get<double>(), point[0].get<double>()});
-    }
-    routes.push_back(std::move(route));
-  }
-
-  return routes;
-}
 // Using chrono timer
 class TimerLog {
  public:
@@ -1242,11 +1197,9 @@ static void persistHeatmap(const std::vector<MatchedRoute>& matched_routes, cons
 
 class ActivityIngester {
  public:
-  ActivityIngester(const std::vector<TileGenerator*>& tile_generators) : tile_generators_(tile_generators) {
-    char* ingest_folder = std::getenv("INGEST_FOLDER");
-    ingest_folder_str_ = ingest_folder ? ingest_folder : DEFAULT_INGEST_FOLDER;
-    // On creation re-ingest the already ingested activities
-    ingestFolder(ingest_folder_str_ + "/ingested", false);
+  ActivityIngester(const std::string& ingest_folder, const std::vector<TileGenerator*>& tile_generators)
+      : tile_generators_(tile_generators) {
+    ingest_folder_str_ = ingest_folder;
     start();
   }
 
@@ -1298,6 +1251,7 @@ class ActivityIngester {
   }
 
   void start() {
+    ingestFolder(ingest_folder_str_ + "/ingested", false);
     ingest_thread_ = std::thread([this]() {
       std::cout << "Ingest folder: " << ingest_folder_str_ << std::endl;
 
@@ -1325,14 +1279,266 @@ class ActivityIngester {
   std::vector<TileGenerator*> tile_generators_;
 };
 
-int main(int argc, char** argv) {
-  std::string url_path = "/tiles";
-  int port = 9090;
-  if (argc > 2) {
-    url_path = argv[1];
-    port = std::stoi(argv[2]);
+class User {
+ public:
+  std::string name;
+  std::string id;
+
+  User(const std::string& name, const std::string& id) : name(name), id(id) {
   }
 
+  std::string getHeatmapFile() const {
+    return getDataDir() + "/" + id + "/heatmap.pb";
+  }
+  std::string getIngestFolder() const {
+    return getDataDir() + "/" + id + "/ingest";
+  }
+  std::string getRouteFile() const {
+    return getDataDir() + "/" + id + "/strava.geojson";
+  }
+  std::string getUrlPath() const {
+    std::string url_path = name;
+    std::transform(url_path.begin(), url_path.end(), url_path.begin(), [](unsigned char c) { return std::tolower(c); });
+    return "/" + url_path;
+  }
+
+  std::vector<Route> load_all_routes() {
+    std::vector<Route> routes;
+
+    std::ifstream file(getRouteFile());
+    if (!file.is_open()) {
+      throw std::runtime_error("Failed to open route file: " + getRouteFile());
+    }
+
+    nlohmann::json doc;
+    file >> doc;
+
+    for (const auto& feature : doc["features"]) {
+      const auto& geometry = feature["geometry"];
+      if (geometry["type"].get<std::string>() != "LineString") {
+        continue;
+      }
+
+      Route route;
+      route.link = feature["properties"]["link"];
+      route.activity_id = feature["properties"]["activity_id"];
+      if (activity_id_blacklist.end() !=
+          std::find(activity_id_blacklist.begin(), activity_id_blacklist.end(), route.activity_id)) {
+        continue;
+      }
+      route.name = feature["properties"]["name"];
+      route.date = feature["properties"]["date"];
+      for (const auto& point : geometry["coordinates"]) {
+        // GeoJSON coordinates are [lon, lat]
+        route.route.push_back(Coordinate{point[1].get<double>(), point[0].get<double>()});
+      }
+      routes.push_back(std::move(route));
+    }
+
+    return routes;
+  }
+
+  void create(httplib::Server& svr) {
+    std::cout << "Loading OSM data from data/zealand.pbf..." << std::endl;
+
+    // Print program name
+    fprintf(stderr, "Witx Heatmap Route Planner\n");
+
+    std::string heatmap_file_path_str = getHeatmapFile();
+
+    {
+#if !RESTORE
+      auto routes = load_all_routes();
+      RouteMatcher matcher;
+      matched_routes = matcher.matchAllRoutes(routes);
+      persistHeatmap(matched_routes, heatmap_file_path_str);
+
+#else
+
+      std::ifstream heatmap_file(heatmap_file_path_str, std::ios::binary);
+      if (!heatmap_file.is_open()) {
+        throw std::runtime_error("Failed to open heatmap file for reading: " + heatmap_file_path_str);
+      }
+      TimerLog restore_timer("Loading matched routes from heatmap file");
+      witxheatmap::PHeatmap heatmap_proto;
+      if (!heatmap_proto.ParseFromIstream(&heatmap_file)) {
+        throw std::runtime_error("Failed to parse heatmap file: " + heatmap_file_path_str);
+      }
+      matched_routes.reserve(heatmap_proto.matched_routes_size());
+      for (const auto& proto_matched_route : heatmap_proto.matched_routes()) {
+        matched_routes.push_back(matchedRouteFromProto(proto_matched_route));
+      }
+#endif
+    }
+
+    {
+      TimerLog alpha_shapes_timer("Generating alpha shapes for radius 4000");
+      auto it = alpha_shapes.emplace(
+          4000, std::make_unique<AlphaShapeTileGenerator>(matched_routes, static_cast<double>(4000)));
+      tile_generators_.push_back(it.first->second.get());
+    }
+    {
+      TimerLog alpha_shapes_timer("Generating alpha shapes for radius 7000");
+      auto it = alpha_shapes.emplace(
+          7000, std::make_unique<AlphaShapeTileGenerator>(matched_routes, static_cast<double>(7000)));
+      tile_generators_.push_back(it.first->second.get());
+    }
+    {
+      TimerLog alpha_shapes_timer("Generating alpha shapes for radius 10000");
+      auto it = alpha_shapes.emplace(
+          10000, std::make_unique<AlphaShapeTileGenerator>(matched_routes, static_cast<double>(10000)));
+      tile_generators_.push_back(it.first->second.get());
+    }
+
+    // Main route planning endpoint
+    std::string url_path = getUrlPath();
+    svr.Get(
+        url_path + R"(/coverage/(\d+)/(\d+)/(\d+).png)", [this](const httplib::Request& req, httplib::Response& res) {
+          // Heatmap XYZ tile request from url like /tiles/{z}/{x}/{y}.png
+          for (const auto& param : req.path_params) {
+            fprintf(stderr, "Path param: %s = %s\n", param.first.c_str(), param.second.c_str());
+          }
+          int z = std::stoi(req.matches[1]);
+          int x = std::stoi(req.matches[2]);
+          int y = std::stoi(req.matches[3]);
+          std::string user = req.has_param("user") ? req.get_param_value("user") : "";
+          int radius = req.has_param("radius") ? std::stoi(req.get_param_value("radius")) : 0;
+          // fprintf(stderr, "Received tile request for z=%d, x=%d, y=%d\n", z, x, y);
+
+          // For now just return a placeholder PNG image (256x256 pixel)
+          auto it = alpha_shapes.find(radius);
+          if (it == alpha_shapes.end()) {
+            std::lock_guard<std::mutex> lock(alpha_shapes_mutex);
+            it = alpha_shapes
+                     .emplace(radius,
+                              std::make_unique<AlphaShapeTileGenerator>(matched_routes, static_cast<double>(radius)))
+                     .first;
+          }
+          Tile tile = it->second->getTile(z, x, y);
+          cv::Mat png_data = tile.getImage();
+          std::vector<unsigned char> buffer;
+          cv::imencode(".png", png_data, buffer);
+          res.set_content(reinterpret_cast<const char*>(buffer.data()), buffer.size(), "image/png");
+        });
+
+    {
+      TimerLog squadrat_tiles_timer("Generating squadrats for radius 500");
+      auto it = squadrat_tile_generators.emplace(
+          500, std::make_unique<SquadratTileGenerator>(matched_routes, static_cast<double>(500)));
+      tile_generators_.push_back(it.first->second.get());
+    }
+    {
+      TimerLog squadrat_tiles_timer("Generating squadrats for radius 1000");
+      auto it = squadrat_tile_generators.emplace(
+          1000, std::make_unique<SquadratTileGenerator>(matched_routes, static_cast<double>(1000)));
+      tile_generators_.push_back(it.first->second.get());
+    }
+    {
+      TimerLog squadrat_tiles_timer("Generating squadrats for radius 1600");
+      auto it = squadrat_tile_generators.emplace(
+          1600, std::make_unique<SquadratTileGenerator>(matched_routes, static_cast<double>(1600)));
+      tile_generators_.push_back(it.first->second.get());
+    }
+    {
+      TimerLog squadrat_tiles_timer("Generating squadrats for radius 2000");
+      auto it = squadrat_tile_generators.emplace(
+          2000, std::make_unique<SquadratTileGenerator>(matched_routes, static_cast<double>(2000)));
+      tile_generators_.push_back(it.first->second.get());
+    }
+
+    svr.Get(url_path + R"(/squadrat/(\d+)/(\d+)/(\d+).png)", [this](const httplib::Request& req,
+                                                                    httplib::Response& res) {
+      // Heatmap XYZ tile request from url like /tiles/{z}/{x}/{y}.png
+      for (const auto& param : req.path_params) {
+        fprintf(stderr, "Path param: %s = %s\n", param.first.c_str(), param.second.c_str());
+      }
+      int z = std::stoi(req.matches[1]);
+      int x = std::stoi(req.matches[2]);
+      int y = std::stoi(req.matches[3]);
+      std::string user = req.has_param("user") ? req.get_param_value("user") : "";
+      int radius = req.has_param("radius") ? std::stoi(req.get_param_value("radius")) : 0;
+      // fprintf(stderr, "Received tile request for z=%d, x=%d, y=%d\n", z, x, y);
+
+      // For now just return a placeholder PNG image (256x256 pixel)
+      auto it = squadrat_tile_generators.find(radius);
+      if (it == squadrat_tile_generators.end()) {
+        std::lock_guard<std::mutex> lock(squadrat_tiles_mutex);
+        it = squadrat_tile_generators
+                 .emplace(radius, std::make_unique<SquadratTileGenerator>(matched_routes, static_cast<double>(radius)))
+                 .first;
+      }
+      Tile tile = it->second->getTile(z, x, y);
+      cv::Mat png_data = tile.getImage();
+      std::vector<unsigned char> buffer;
+      cv::imencode(".png", png_data, buffer);
+      res.set_content(reinterpret_cast<const char*>(buffer.data()), buffer.size(), "image/png");
+    });
+
+    traversal_tile_generator = std::make_unique<TraversalTileGenerator>(matched_routes);
+    tile_generators_.push_back(traversal_tile_generator.get());
+
+    svr.Get(url_path + R"(/traversal/(\d+)/(\d+)/(\d+).png)",
+            [this](const httplib::Request& req, httplib::Response& res) {
+              // Heatmap XYZ tile request from url like /traversal/{z}/{x}/{y}.png
+              for (const auto& param : req.path_params) {
+                fprintf(stderr, "Path param: %s = %s\n", param.first.c_str(), param.second.c_str());
+              }
+              int z = std::stoi(req.matches[1]);
+              int x = std::stoi(req.matches[2]);
+              int y = std::stoi(req.matches[3]);
+              std::string user = req.has_param("user") ? req.get_param_value("user") : "";
+
+              // For now just return a placeholder PNG image (256x256 pixel)
+              Tile tile = traversal_tile_generator->getTile(z, x, y);
+              cv::Mat png_data = tile.getImage();
+              std::vector<unsigned char> buffer;
+              cv::imencode(".png", png_data, buffer);
+              res.set_content(reinterpret_cast<const char*>(buffer.data()), buffer.size(), "image/png");
+            });
+
+    heatmap_tile_generator = std::make_unique<StravaHeatmapTileGenerator>(matched_routes);
+    tile_generators_.push_back(heatmap_tile_generator.get());
+
+    svr.Get(url_path + R"(/heatmap/(\d+)/(\d+)/(\d+).png)",
+            [this](const httplib::Request& req, httplib::Response& res) {
+              // Heatmap XYZ tile request from url like /heatmap/{z}/{x}/{y}.png
+              for (const auto& param : req.path_params) {
+                fprintf(stderr, "Path param: %s = %s\n", param.first.c_str(), param.second.c_str());
+              }
+              int z = std::stoi(req.matches[1]);
+              int x = std::stoi(req.matches[2]);
+              int y = std::stoi(req.matches[3]);
+              std::string user = req.has_param("user") ? req.get_param_value("user") : "";
+
+              // For now just return a placeholder PNG image (256x256 pixel)
+              Tile tile = heatmap_tile_generator->getTile(z, x, y);
+              cv::Mat png_data = tile.getImage();
+              std::vector<unsigned char> buffer;
+              cv::imencode(".png", png_data, buffer);
+              res.set_content(reinterpret_cast<const char*>(buffer.data()), buffer.size(), "image/png");
+            });
+
+    ingester_ = std::make_unique<ActivityIngester>(getIngestFolder(), tile_generators_);
+  }
+
+ private:
+  std::unique_ptr<ActivityIngester> ingester_;
+  std::vector<MatchedRoute> matched_routes;
+  std::mutex alpha_shapes_mutex;
+  std::unordered_map<int, std::unique_ptr<AlphaShapeTileGenerator>> alpha_shapes;
+
+  std::unordered_map<int, std::unique_ptr<SquadratTileGenerator>> squadrat_tile_generators;
+  std::mutex squadrat_tiles_mutex;
+
+  std::unique_ptr<TraversalTileGenerator> traversal_tile_generator;
+
+  std::unique_ptr<StravaHeatmapTileGenerator> heatmap_tile_generator;
+
+  std::vector<TileGenerator*> tile_generators_;
+};
+
+int main(int argc, char** argv) {
+  int port = 9090;
   // Create HTTP server
   httplib::Server svr;
 
@@ -1356,191 +1562,6 @@ int main(int argc, char** argv) {
     res.set_content("{\"status\": \"ok\"}", "application/json");
   });
 
-  std::cout << "Loading OSM data from data/zealand.pbf..." << std::endl;
-
-  // Print program name
-  fprintf(stderr, "Witx Heatmap Route Planner\n");
-
-  char* heatmap_file_path = std::getenv("HEATMAP_FILE_PATH");
-  std::string heatmap_file_path_str(heatmap_file_path ? heatmap_file_path : HEATMAP_FILE);
-
-  std::vector<MatchedRoute> matched_routes;
-  {
-#if !RESTORE
-    auto routes = load_all_routes();
-    RouteMatcher matcher;
-    matched_routes = matcher.matchAllRoutes(routes);
-    persistHeatmap(matched_routes, heatmap_file_path_str);
-
-#else
-
-    std::ifstream heatmap_file(heatmap_file_path_str, std::ios::binary);
-    if (!heatmap_file.is_open()) {
-      throw std::runtime_error("Failed to open heatmap file for reading: " + heatmap_file_path_str);
-    }
-    TimerLog restore_timer("Loading matched routes from heatmap file");
-    witxheatmap::PHeatmap heatmap_proto;
-    if (!heatmap_proto.ParseFromIstream(&heatmap_file)) {
-      throw std::runtime_error("Failed to parse heatmap file: " + heatmap_file_path_str);
-    }
-    matched_routes.reserve(heatmap_proto.matched_routes_size());
-    for (const auto& proto_matched_route : heatmap_proto.matched_routes()) {
-      matched_routes.push_back(matchedRouteFromProto(proto_matched_route));
-    }
-#endif
-  }
-  std::vector<TileGenerator*> tile_generators;
-
-  std::unordered_map<int, std::unique_ptr<AlphaShapeTileGenerator>> alpha_shapes;
-  {
-    TimerLog alpha_shapes_timer("Generating alpha shapes for radius 4000");
-    auto it = alpha_shapes.emplace(
-        4000, std::make_unique<AlphaShapeTileGenerator>(matched_routes, static_cast<double>(4000)));
-    tile_generators.push_back(it.first->second.get());
-  }
-  {
-    TimerLog alpha_shapes_timer("Generating alpha shapes for radius 7000");
-    auto it = alpha_shapes.emplace(
-        7000, std::make_unique<AlphaShapeTileGenerator>(matched_routes, static_cast<double>(7000)));
-    tile_generators.push_back(it.first->second.get());
-  }
-  {
-    TimerLog alpha_shapes_timer("Generating alpha shapes for radius 10000");
-    auto it = alpha_shapes.emplace(
-        10000, std::make_unique<AlphaShapeTileGenerator>(matched_routes, static_cast<double>(10000)));
-    tile_generators.push_back(it.first->second.get());
-  }
-  std::mutex alpha_shapes_mutex;
-
-  // Main route planning endpoint
-  svr.Get(url_path + R"(/coverage/(\d+)/(\d+)/(\d+).png)", [&matched_routes, &alpha_shapes, &alpha_shapes_mutex](
-                                                               const httplib::Request& req, httplib::Response& res) {
-    // Heatmap XYZ tile request from url like /tiles/{z}/{x}/{y}.png
-    for (const auto& param : req.path_params) {
-      fprintf(stderr, "Path param: %s = %s\n", param.first.c_str(), param.second.c_str());
-    }
-    int z = std::stoi(req.matches[1]);
-    int x = std::stoi(req.matches[2]);
-    int y = std::stoi(req.matches[3]);
-    std::string user = req.has_param("user") ? req.get_param_value("user") : "";
-    int radius = req.has_param("radius") ? std::stoi(req.get_param_value("radius")) : 0;
-    // fprintf(stderr, "Received tile request for z=%d, x=%d, y=%d\n", z, x, y);
-
-    // For now just return a placeholder PNG image (256x256 pixel)
-    auto it = alpha_shapes.find(radius);
-    if (it == alpha_shapes.end()) {
-      std::lock_guard<std::mutex> lock(alpha_shapes_mutex);
-      it = alpha_shapes
-               .emplace(radius, std::make_unique<AlphaShapeTileGenerator>(matched_routes, static_cast<double>(radius)))
-               .first;
-    }
-    Tile tile = it->second->getTile(z, x, y);
-    cv::Mat png_data = tile.getImage();
-    std::vector<unsigned char> buffer;
-    cv::imencode(".png", png_data, buffer);
-    res.set_content(reinterpret_cast<const char*>(buffer.data()), buffer.size(), "image/png");
-  });
-
-  std::unordered_map<int, std::unique_ptr<SquadratTileGenerator>> squadrat_tile_generators;
-  {
-    TimerLog squadrat_tiles_timer("Generating squadrats for radius 500");
-    auto it = squadrat_tile_generators.emplace(
-        500, std::make_unique<SquadratTileGenerator>(matched_routes, static_cast<double>(500)));
-    tile_generators.push_back(it.first->second.get());
-  }
-  {
-    TimerLog squadrat_tiles_timer("Generating squadrats for radius 1000");
-    auto it = squadrat_tile_generators.emplace(
-        1000, std::make_unique<SquadratTileGenerator>(matched_routes, static_cast<double>(1000)));
-    tile_generators.push_back(it.first->second.get());
-  }
-  {
-    TimerLog squadrat_tiles_timer("Generating squadrats for radius 1600");
-    auto it = squadrat_tile_generators.emplace(
-        1600, std::make_unique<SquadratTileGenerator>(matched_routes, static_cast<double>(1600)));
-    tile_generators.push_back(it.first->second.get());
-  }
-  {
-    TimerLog squadrat_tiles_timer("Generating squadrats for radius 2000");
-    auto it = squadrat_tile_generators.emplace(
-        2000, std::make_unique<SquadratTileGenerator>(matched_routes, static_cast<double>(2000)));
-    tile_generators.push_back(it.first->second.get());
-  }
-  std::mutex squadrat_tiles_mutex;
-
-  svr.Get(url_path + R"(/squadrat/(\d+)/(\d+)/(\d+).png)", [&matched_routes, &squadrat_tile_generators,
-                                                            &squadrat_tiles_mutex](const httplib::Request& req,
-                                                                                   httplib::Response& res) {
-    // Heatmap XYZ tile request from url like /tiles/{z}/{x}/{y}.png
-    for (const auto& param : req.path_params) {
-      fprintf(stderr, "Path param: %s = %s\n", param.first.c_str(), param.second.c_str());
-    }
-    int z = std::stoi(req.matches[1]);
-    int x = std::stoi(req.matches[2]);
-    int y = std::stoi(req.matches[3]);
-    std::string user = req.has_param("user") ? req.get_param_value("user") : "";
-    int radius = req.has_param("radius") ? std::stoi(req.get_param_value("radius")) : 0;
-    // fprintf(stderr, "Received tile request for z=%d, x=%d, y=%d\n", z, x, y);
-
-    // For now just return a placeholder PNG image (256x256 pixel)
-    auto it = squadrat_tile_generators.find(radius);
-    if (it == squadrat_tile_generators.end()) {
-      std::lock_guard<std::mutex> lock(squadrat_tiles_mutex);
-      it = squadrat_tile_generators
-               .emplace(radius, std::make_unique<SquadratTileGenerator>(matched_routes, static_cast<double>(radius)))
-               .first;
-    }
-    Tile tile = it->second->getTile(z, x, y);
-    cv::Mat png_data = tile.getImage();
-    std::vector<unsigned char> buffer;
-    cv::imencode(".png", png_data, buffer);
-    res.set_content(reinterpret_cast<const char*>(buffer.data()), buffer.size(), "image/png");
-  });
-
-  TraversalTileGenerator traversal_tile_generator(matched_routes);
-  tile_generators.push_back(&traversal_tile_generator);
-
-  svr.Get(url_path + R"(/traversal/(\d+)/(\d+)/(\d+).png)",
-          [&traversal_tile_generator](const httplib::Request& req, httplib::Response& res) {
-            // Heatmap XYZ tile request from url like /traversal/{z}/{x}/{y}.png
-            for (const auto& param : req.path_params) {
-              fprintf(stderr, "Path param: %s = %s\n", param.first.c_str(), param.second.c_str());
-            }
-            int z = std::stoi(req.matches[1]);
-            int x = std::stoi(req.matches[2]);
-            int y = std::stoi(req.matches[3]);
-            std::string user = req.has_param("user") ? req.get_param_value("user") : "";
-
-            // For now just return a placeholder PNG image (256x256 pixel)
-            Tile tile = traversal_tile_generator.getTile(z, x, y);
-            cv::Mat png_data = tile.getImage();
-            std::vector<unsigned char> buffer;
-            cv::imencode(".png", png_data, buffer);
-            res.set_content(reinterpret_cast<const char*>(buffer.data()), buffer.size(), "image/png");
-          });
-
-  StravaHeatmapTileGenerator heatmap_tile_generator(matched_routes);
-  tile_generators.push_back(&heatmap_tile_generator);
-
-  svr.Get(url_path + R"(/heatmap/(\d+)/(\d+)/(\d+).png)",
-          [&heatmap_tile_generator](const httplib::Request& req, httplib::Response& res) {
-            // Heatmap XYZ tile request from url like /heatmap/{z}/{x}/{y}.png
-            for (const auto& param : req.path_params) {
-              fprintf(stderr, "Path param: %s = %s\n", param.first.c_str(), param.second.c_str());
-            }
-            int z = std::stoi(req.matches[1]);
-            int x = std::stoi(req.matches[2]);
-            int y = std::stoi(req.matches[3]);
-            std::string user = req.has_param("user") ? req.get_param_value("user") : "";
-
-            // For now just return a placeholder PNG image (256x256 pixel)
-            Tile tile = heatmap_tile_generator.getTile(z, x, y);
-            cv::Mat png_data = tile.getImage();
-            std::vector<unsigned char> buffer;
-            cv::imencode(".png", png_data, buffer);
-            res.set_content(reinterpret_cast<const char*>(buffer.data()), buffer.size(), "image/png");
-          });
-
   svr.set_exception_handler([](const auto& req, auto& res, std::exception_ptr ep) {
     auto fmt = "<h1>Error 500</h1><p>%s</p>";
     char buf[BUFSIZ];
@@ -1559,7 +1580,14 @@ int main(int argc, char** argv) {
     res.status = httplib::StatusCode::InternalServerError_500;
   });
 
-  ActivityIngester ingester(tile_generators);
+  std::list<User> users;
+  users.emplace_back("Christian", "16938953");
+  // users.emplace_back("Nikolaj", "38458035");
+  // users.emplace_back("Thomas", "79701175");
+
+  for (auto& user : users) {
+    user.create(svr);
+  }
 
   // Start server
   std::cout << "\n==================================================" << std::endl;
