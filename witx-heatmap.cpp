@@ -29,6 +29,7 @@
 
 #define VALHALLA_CONFIG_FILE "/home/christian/git/witx-heatmap/data/routing/valhalla_data/valhalla.json"
 #define RESTORE 1
+#define THREAD_COUNT 1
 
 const std::set<std::string> activity_id_blacklist = {
     "5055464955",
@@ -996,17 +997,13 @@ class RouteMatcher {
     TimerLog timer("Valhalla initialization");
     const auto& config = valhalla::config(valhalla_config_file_str);
     // auto_cleanup releases the loki/thor/odin workers' caches between calls.
-    actors_.emplace_back(config, /*auto_cleanup=*/true);
-    actors_.emplace_back(config, /*auto_cleanup=*/true);
-    actors_.emplace_back(config, /*auto_cleanup=*/true);
-    actors_.emplace_back(config, /*auto_cleanup=*/true);
-    actors_.emplace_back(config, /*auto_cleanup=*/true);
-    actors_.emplace_back(config, /*auto_cleanup=*/true);
-    actors_.emplace_back(config, /*auto_cleanup=*/true);
+    for (int i = 0; i < THREAD_COUNT; ++i) {
+      actors_.emplace_back(config, /*auto_cleanup=*/true);
+    }
   }
 
   // Match routes to the road network using Valhalla's trace_route (map matching)
-  MatchedRoute matchRoute(valhalla::tyr::actor_t& actor, const Route& route) {
+  MatchedRoute matchRoute(valhalla::tyr::actor_t& actor, const Route& route) const {
     nlohmann::json request;
     request["costing"] = "pedestrian";
     request["shape_match"] = "map_snap";
@@ -1055,11 +1052,12 @@ class RouteMatcher {
   }
 
   std::vector<MatchedRoute> matchAllRoutes(const std::vector<Route>& routes) {
+    std::lock_guard<std::mutex> lock(route_matcher_mutex_);
     std::vector<MatchedRoute> matched_routes;
     std::atomic<int> matched_count = 0;
     std::atomic<int> total_count = 0;
     matched_routes.resize(routes.size());
-#pragma omp parallel for num_threads(7)
+#pragma omp parallel for num_threads(THREAD_COUNT)
     for (std::size_t i = 0; i < routes.size(); ++i) {
       const auto& route = routes[i];
       TimerLog timer("Matching route " + std::to_string(matched_count + 1) + "/" + std::to_string(total_count + 1) +
@@ -1078,8 +1076,14 @@ class RouteMatcher {
     return matched_routes;
   }
 
+  static RouteMatcher& getRouteMatcher() {
+    static RouteMatcher route_matcher;
+    return route_matcher;
+  }
+
  private:
   std::vector<valhalla::tyr::actor_t> actors_;
+  std::mutex route_matcher_mutex_;
 };
 
 class TileKey {
@@ -1369,7 +1373,7 @@ class ActivityIngester {
       }
     }
     if (!routes.empty()) {
-      std::vector<MatchedRoute> matches_routes = ingest_matcher_.matchAllRoutes(routes);
+      std::vector<MatchedRoute> matches_routes = RouteMatcher::getRouteMatcher().matchAllRoutes(routes);
       std::scoped_lock<std::mutex> full_lock(tile_generators_mutex_);
       for (const auto& tile_generator : tile_generators_) {
         tile_generator->addRoutes(matches_routes);
@@ -1400,7 +1404,6 @@ class ActivityIngester {
   }
 
  private:
-  RouteMatcher ingest_matcher_;
   std::string ingest_folder_str_;
   std::thread ingest_thread_;
   double last_cleared_time_ = millisecondsNow();
@@ -1424,8 +1427,7 @@ class User {
     {
 #if !RESTORE
       auto routes = load_all_routes();
-      RouteMatcher matcher;
-      matched_routes = matcher.matchAllRoutes(routes);
+      matched_routes = RouteMatcher::getRouteMatcher().matchAllRoutes(routes);
       persistHeatmap(matched_routes, heatmap_file_path_str);
 
 #else
