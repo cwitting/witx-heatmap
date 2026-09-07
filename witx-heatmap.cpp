@@ -241,6 +241,7 @@ struct SquadratTile {
   mutable double first_visit_time{};
   mutable double last_visit_time{};
   mutable std::string last_athlete_id{};
+  mutable std::unordered_map<std::string, typename std::unordered_set<std::string>> visited_activity_ids{};
 
   bool operator<(const SquadratTile& other) const {
     return std::tie(squadrat_q, squadrat_r) < std::tie(other.squadrat_q, other.squadrat_r);
@@ -258,7 +259,7 @@ struct SquadratTile {
     this->tile_size = tile_size;
   }
 
-  void visit(const std::string& athlete_id, double time) const {
+  void visit(const std::string& athlete_id, const std::string& activity_id, double time) const {
     if (first_visit_time == 0 || time < first_visit_time) {
       first_visit_time = time;
     }
@@ -266,6 +267,7 @@ struct SquadratTile {
       last_visit_time = time;
       last_athlete_id = athlete_id;
     }
+    visited_activity_ids[athlete_id].insert(activity_id);
   }
 
   double getFirstVisitTime() const {
@@ -307,6 +309,32 @@ struct SquadratTile {
       return it->second;
     }
     return cv::Scalar(128, 128, 128, 130);  // default color if not found
+  }
+
+  cv::Scalar getLocalLegendColor() const {
+    std::string most_visited_athlete;
+    size_t max_visits = 0;
+    for (const auto& [athlete_id, activities] : visited_activity_ids) {
+      if (activities.size() > max_visits) {
+        max_visits = activities.size();
+        most_visited_athlete = athlete_id;
+      }
+    }
+    auto it = user_colors.find(most_visited_athlete);
+    if (it != user_colors.end()) {
+      return it->second;
+    }
+    return cv::Scalar(128, 128, 128, 130);  // default color if not found
+  }
+
+  int getMostVisitedCount() const {
+    size_t max_visits = 0;
+    for (const auto& [athlete_id, activities] : visited_activity_ids) {
+      if (activities.size() > max_visits) {
+        max_visits = activities.size();
+      }
+    }
+    return static_cast<int>(max_visits);
   }
 
   // Get the 6 corners of the hexagon in lat/lon degrees
@@ -790,6 +818,24 @@ class Tile {
     }
   }
 
+  void paintLocalLegend(const std::set<SquadratTile>& squadrat_tiles) {
+    for (const auto& tile : squadrat_tiles) {
+      auto polygon = hexToPixelPolygon(tile.getVertices());
+      cv::fillConvexPoly(image_data_, polygon, tile.getLocalLegendColor(), cv::LINE_AA);
+      // Print the age at the hex's centroid
+      cv::Point center(0, 0);
+      for (const auto& p : polygon) {
+        center += p;
+      }
+      center.x = center.x / static_cast<int>(polygon.size()) - 5;  // Center + shift text to be centered
+      center.y = center.y / static_cast<int>(polygon.size()) + 5;
+      if (z_ >= 11) {
+        cv::putText(image_data_, std::to_string((int)tile.getMostVisitedCount()), center, cv::FONT_HERSHEY_SIMPLEX, 0.4,
+                    cv::Scalar(0, 0, 0, 255), 1, cv::LINE_AA);
+      }
+    }
+  }
+
   void paint(const AlphaShape& alpha_shape) {
     // paintRoute(alpha_shape.getMatchedRoutes());
     for (const auto& [p1, p2] : alpha_shape.getBoundaryEdges()) {
@@ -1133,7 +1179,7 @@ class SquadratTileGenerator : public TileGenerator {
       for (const auto& coordinate : matched_route.route.route) {
         std::scoped_lock<std::shared_mutex> full_lock(shared_mutex_);
         auto it = squadrat_tiles_.emplace(coordinate.lat, coordinate.lon, tile_size_);
-        it.first->visit(matched_route.route.athlete_id, visit_time);
+        it.first->visit(matched_route.route.athlete_id, matched_route.route.activity_id, visit_time);
       }
     }
     clearCache();
@@ -1162,6 +1208,19 @@ class CTFTileGenerator : public SquadratTileGenerator {
     {
       std::shared_lock<std::shared_mutex> shared_lock(shared_mutex_);
       tile.paintCTF(squadrat_tiles_);
+    }
+    tile.paintGrid(tile_size_);
+    return tile;
+  }
+};
+
+class LocalLegendTileGenerator : public SquadratTileGenerator {
+  using SquadratTileGenerator::SquadratTileGenerator;
+  Tile generateTile(int z, int x, int y) override {
+    Tile tile(z, x, y);
+    {
+      std::shared_lock<std::shared_mutex> shared_lock(shared_mutex_);
+      tile.paintLocalLegend(squadrat_tiles_);
     }
     tile.paintGrid(tile_size_);
     return tile;
@@ -1633,6 +1692,43 @@ class User {
         cv::imencode(".png", png_data, buffer);
         res.set_content(reinterpret_cast<const char*>(buffer.data()), buffer.size(), "image/png");
       });
+
+      {
+        TimerLog local_legend_tiles_timer("Generating local_legends for radius 1000");
+        auto it = local_legend_tile_generators.emplace(
+            1000, std::make_unique<LocalLegendTileGenerator>(matched_routes, static_cast<double>(1000)));
+        tile_generators_.push_back(local_legend_tile_generators.find(1000)->second.get());
+      }
+
+      svr.Get(url_path + R"(/local_legend/(\d+)/(\d+)/(\d+).png)",
+              [this](const httplib::Request& req, httplib::Response& res) {
+                // Heatmap XYZ tile request from url like /tiles/{z}/{x}/{y}.png
+                for (const auto& param : req.path_params) {
+                  fprintf(stderr, "Path param: %s = %s\n", param.first.c_str(), param.second.c_str());
+                }
+                int z = std::stoi(req.matches[1]);
+                int x = std::stoi(req.matches[2]);
+                int y = std::stoi(req.matches[3]);
+                std::string user = req.has_param("user") ? req.get_param_value("user") : "";
+                int radius = req.has_param("radius") ? std::stoi(req.get_param_value("radius")) : 0;
+                // fprintf(stderr, "Received tile request for z=%d, x=%d, y=%d\n", z, x, y);
+
+                // For now just return a placeholder PNG image (256x256 pixel)
+                auto it = local_legend_tile_generators.find(radius);
+                if (it == local_legend_tile_generators.end()) {
+                  std::lock_guard<std::mutex> lock(squadrat_tiles_mutex);
+                  it = local_legend_tile_generators
+                           .emplace(radius, std::make_unique<LocalLegendTileGenerator>(matched_routes,
+                                                                                       static_cast<double>(radius)))
+                           .first;
+                }
+                Tile tile = it->second->getTile(z, x, y);
+                cv::Mat png_data = tile.getImage();
+                std::vector<unsigned char> buffer;
+                cv::imencode(".png", png_data, buffer);
+                res.set_content(reinterpret_cast<const char*>(buffer.data()), buffer.size(), "image/png");
+              });
+
       for (User* user : meta_users) {
         auto ingester = user->getActivityIngester().get();
         if (ingester) {
@@ -1664,6 +1760,9 @@ class User {
 
   std::unordered_map<int, std::unique_ptr<CTFTileGenerator>> ctf_tile_generators;
   std::mutex ctf_tiles_mutex;
+
+  std::unordered_map<int, std::unique_ptr<LocalLegendTileGenerator>> local_legend_tile_generators;
+  std::mutex local_legend_tiles_mutex;
 
   std::unique_ptr<TraversalTileGenerator> traversal_tile_generator;
 
