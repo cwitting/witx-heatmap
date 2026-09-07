@@ -45,14 +45,20 @@ pkg_check_modules(VALHALLA_DEPS REQUIRED
 
 find_path(PROTOZERO_INCLUDE_DIR protozero/pbf_reader.hpp)
 
+set(protobuf_MODULE_COMPATIBLE ON CACHE BOOL "")
+find_package(Protobuf REQUIRED)
+protobuf_generate_cpp(HEATMAP_PROTO_SRCS HEATMAP_PROTO_HDRS heatmap.proto)
+
 # Add executable
-add_executable(witx-heatmap witx-heatmap.cpp)
+add_executable(witx-heatmap witx-heatmap.cpp ${HEATMAP_PROTO_SRCS} ${HEATMAP_PROTO_HDRS})
 
 target_include_directories(witx-heatmap PRIVATE
     ${VALHALLA_INCLUDE_DIRS}
     ${VALHALLA_DEPS_INCLUDE_DIRS}
     ${VALHALLA_STATIC_INCLUDE_DIRS}
     ${OpenCV_INCLUDE_DIRS}
+    ${Protobuf_INCLUDE_DIRS}
+    ${CMAKE_CURRENT_BINARY_DIR}
 )
 target_compile_options(witx-heatmap PRIVATE ${VALHALLA_CFLAGS_OTHER} ${VALHALLA_DEPS_CFLAGS_OTHER} ${VALHALLA_STATIC_CFLAGS_OTHER})
 
@@ -66,5 +72,6 @@ target_link_libraries(witx-heatmap
     pthread
     OpenMP::OpenMP_CXX
     ${OpenCV_LIBS}
+    protobuf::libprotobuf
 )
 

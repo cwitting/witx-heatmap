@@ -1,0 +1,34 @@
+syntax = "proto3";
+
+package witxheatmap;
+
+message PCoordinate {
+  double lat = 1;
+  double lon = 2;
+}
+
+message PRoute {
+  string link = 1;
+  string activity_id = 2;
+  string name = 3;
+  string date = 4;
+  repeated PCoordinate route = 5;
+}
+
+message PWaySegment {
+  string way_id = 1;
+  uint64 edge_id = 2;
+  PRoute geometry = 3;
+  int32 traversal_count = 4;
+  double first_traversal_time = 5;
+  double last_traversal_time = 6;
+}
+
+message PMatchedRoute {
+  PRoute route = 1;
+  repeated PWaySegment way_segments = 2;
+}
+
+message PHeatmap {
+  repeated PMatchedRoute matched_routes = 1;
+}

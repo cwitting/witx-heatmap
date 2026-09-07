@@ -24,11 +24,12 @@
 #include <unordered_map>
 #include <vector>
 
+#include "heatmap.pb.h"
 #include "httplib.h"
 #include "json.hpp"
 
 #define VALHALLA_CONFIG_FILE "/home/christian/git/witx-heatmap/data/routing/valhalla_data/valhalla.json"
-#define RESTORE 1
+#define RESTORE 0
 
 const std::set<std::string> activity_id_blacklist = {
     "5055464955",
@@ -36,17 +37,17 @@ const std::set<std::string> activity_id_blacklist = {
 
 // Christian
 #define ROUTE_FILE "/media/christian/Data/Backup/strava/strava_christian_full.geojson"
-#define HEATMAP_FILE "/media/christian/Data/Backup/strava/heatmap_christian.json"
+#define HEATMAP_FILE "/media/christian/Data/Backup/strava/heatmap_christian.pb"
 #define DEFAULT_INGEST_FOLDER "/home/christian/git/witx-heatmap/data/ingest_christian"
 
 // Thomas
 // #define ROUTE_FILE "/media/christian/Data/Backup/strava/strava_thomas_full.geojson"
-// #define HEATMAP_FILE "/media/christian/Data/Backup/strava/heatmap_thomas.json"
+// #define HEATMAP_FILE "/media/christian/Data/Backup/strava/heatmap_thomas.pb"
 // #define DEFAULT_INGEST_FOLDER "/home/christian/git/witx-heatmap/data/ingest_thomas"
 
 // Nikolaj
 // #define ROUTE_FILE "/media/christian/Data/Backup/strava/strava_nikolaj_full.geojson"
-// #define HEATMAP_FILE "/home/christian/git/witx-heatmap/data/heatmap_nikolaj.json"
+// #define HEATMAP_FILE "/home/christian/git/witx-heatmap/data/heatmap_nikolaj.pb"
 // #define DEFAULT_INGEST_FOLDER "/home/christian/git/witx-heatmap/data/ingest_nikolaj"
 
 struct Coordinate {
@@ -345,6 +346,74 @@ struct MatchedRoute {
 };
 
 NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE(MatchedRoute, route, way_segments)
+
+static witxheatmap::PRoute routeToProto(const Route& route) {
+  witxheatmap::PRoute proto;
+  proto.set_link(route.link);
+  proto.set_activity_id(route.activity_id);
+  proto.set_name(route.name);
+  proto.set_date(route.date);
+  for (const auto& coord : route.route) {
+    auto* proto_coord = proto.add_route();
+    proto_coord->set_lat(coord.lat);
+    proto_coord->set_lon(coord.lon);
+  }
+  return proto;
+}
+
+static Route routeFromProto(const witxheatmap::PRoute& proto) {
+  Route route;
+  route.link = proto.link();
+  route.activity_id = proto.activity_id();
+  route.name = proto.name();
+  route.date = proto.date();
+  route.route.reserve(proto.route_size());
+  for (const auto& proto_coord : proto.route()) {
+    route.route.push_back(Coordinate{proto_coord.lat(), proto_coord.lon()});
+  }
+  return route;
+}
+
+static witxheatmap::PWaySegment waySegmentToProto(const WaySegment& segment) {
+  witxheatmap::PWaySegment proto;
+  proto.set_way_id(segment.way_id);
+  proto.set_edge_id(segment.edge_id);
+  *proto.mutable_geometry() = routeToProto(segment.geometry);
+  proto.set_traversal_count(segment.traversal_count);
+  proto.set_first_traversal_time(segment.first_traversal_time);
+  proto.set_last_traversal_time(segment.last_traversal_time);
+  return proto;
+}
+
+static WaySegment waySegmentFromProto(const witxheatmap::PWaySegment& proto) {
+  WaySegment segment;
+  segment.way_id = proto.way_id();
+  segment.edge_id = proto.edge_id();
+  segment.geometry = routeFromProto(proto.geometry());
+  segment.traversal_count = proto.traversal_count();
+  segment.first_traversal_time = proto.first_traversal_time();
+  segment.last_traversal_time = proto.last_traversal_time();
+  return segment;
+}
+
+static witxheatmap::PMatchedRoute matchedRouteToProto(const MatchedRoute& matched_route) {
+  witxheatmap::PMatchedRoute proto;
+  *proto.mutable_route() = routeToProto(matched_route.route);
+  for (const auto& segment : matched_route.way_segments) {
+    *proto.add_way_segments() = waySegmentToProto(segment);
+  }
+  return proto;
+}
+
+static MatchedRoute matchedRouteFromProto(const witxheatmap::PMatchedRoute& proto) {
+  MatchedRoute matched_route;
+  matched_route.route = routeFromProto(proto.route());
+  matched_route.way_segments.reserve(proto.way_segments_size());
+  for (const auto& proto_segment : proto.way_segments()) {
+    matched_route.way_segments.push_back(waySegmentFromProto(proto_segment));
+  }
+  return matched_route;
+}
 
 static double haversineDistance(const Coordinate& coord1, const Coordinate& coord2) {
   constexpr double EARTH_RADIUS_KM = 6371.0;
@@ -1148,12 +1217,17 @@ class StravaHeatmapTileGenerator : public TileGenerator {
 };
 
 static void persistHeatmap(const std::vector<MatchedRoute>& matched_routes, const std::string& heatmap_file_path_str) {
-  nlohmann::json heatmap_json = matched_routes;
-  std::ofstream heatmap_file(heatmap_file_path_str);
+  witxheatmap::PHeatmap heatmap_proto;
+  for (const auto& matched_route : matched_routes) {
+    *heatmap_proto.add_matched_routes() = matchedRouteToProto(matched_route);
+  }
+  std::ofstream heatmap_file(heatmap_file_path_str, std::ios::binary);
   if (!heatmap_file.is_open()) {
     throw std::runtime_error("Failed to open heatmap file for writing: " + heatmap_file_path_str);
   }
-  heatmap_file << heatmap_json.dump(2);
+  if (!heatmap_proto.SerializeToOstream(&heatmap_file)) {
+    throw std::runtime_error("Failed to serialize heatmap to: " + heatmap_file_path_str);
+  }
   heatmap_file.close();
 }
 
@@ -1291,14 +1365,19 @@ int main(int argc, char** argv) {
 
 #else
 
-    std::ifstream heatmap_file(heatmap_file_path_str);
+    std::ifstream heatmap_file(heatmap_file_path_str, std::ios::binary);
     if (!heatmap_file.is_open()) {
       throw std::runtime_error("Failed to open heatmap file for reading: " + heatmap_file_path_str);
     }
-    TimerLog restore_timer("Loading matched routes from heatmap.json");
-    nlohmann::json heatmap_json;
-    heatmap_file >> heatmap_json;
-    matched_routes = heatmap_json.get<std::vector<MatchedRoute>>();
+    TimerLog restore_timer("Loading matched routes from heatmap file");
+    witxheatmap::PHeatmap heatmap_proto;
+    if (!heatmap_proto.ParseFromIstream(&heatmap_file)) {
+      throw std::runtime_error("Failed to parse heatmap file: " + heatmap_file_path_str);
+    }
+    matched_routes.reserve(heatmap_proto.matched_routes_size());
+    for (const auto& proto_matched_route : heatmap_proto.matched_routes()) {
+      matched_routes.push_back(matchedRouteFromProto(proto_matched_route));
+    }
 #endif
   }
   std::vector<TileGenerator*> tile_generators;
