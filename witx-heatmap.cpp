@@ -1268,6 +1268,11 @@ class ActivityIngester {
     }
   }
 
+  void addTilegenerators(const std::vector<TileGenerator*>& tile_generators) {
+    std::scoped_lock<std::mutex> full_lock(tile_generators_mutex_);
+    tile_generators_.insert(tile_generators_.end(), tile_generators.begin(), tile_generators.end());
+  }
+
   void ingestFolder(const std::string& ingest_folder_str, bool move_activities) {
     if (!std::filesystem::exists(ingest_folder_str)) {
       std::cerr << "Ingest folder does not exist: " << ingest_folder_str << std::endl;
@@ -1306,6 +1311,7 @@ class ActivityIngester {
     }
     if (!routes.empty()) {
       std::vector<MatchedRoute> matches_routes = ingest_matcher_.matchAllRoutes(routes);
+      std::scoped_lock<std::mutex> full_lock(tile_generators_mutex_);
       for (const auto& tile_generator : tile_generators_) {
         tile_generator->addRoutes(matches_routes);
       }
@@ -1321,6 +1327,7 @@ class ActivityIngester {
         // Clear cache once a day
         if (millisecondsNow() - last_cleared_time_ > MILLISECONDS_PER_DAY) {
           // Clear cache logic here
+          std::scoped_lock<std::mutex> full_lock(tile_generators_mutex_);
           for (const auto& tile_generator : tile_generators_) {
             tile_generator->clearCache();
           }
@@ -1338,6 +1345,7 @@ class ActivityIngester {
   std::string ingest_folder_str_;
   std::thread ingest_thread_;
   double last_cleared_time_ = millisecondsNow();
+  std::mutex tile_generators_mutex_;
   std::vector<TileGenerator*> tile_generators_;
 };
 
@@ -1383,12 +1391,12 @@ class User {
   // REMEMBER TO HANDLE INGESTER TOO
   User(std::list<User>& users) {
     name = "Coop";
-    for (const auto& user : users) {
+    for (auto& user : users) {
       fprintf(stderr, "Merging %ld routes from user: %s\n", user.getMatchedRoutes().size(), user.name.c_str());
       fprintf(stderr, "Current total matched routes: %ld\n", matched_routes.size());
       matched_routes.insert(matched_routes.end(), user.getMatchedRoutes().begin(), user.getMatchedRoutes().end());
+      meta_users.emplace_back(&user);
     }
-    has_coop_endpoints_ = true;
   }
 
   std::string getHeatmapFile() const {
@@ -1591,7 +1599,7 @@ class User {
               res.set_content(reinterpret_cast<const char*>(buffer.data()), buffer.size(), "image/png");
             });
 
-    if (has_coop_endpoints_) {
+    if (!meta_users.empty()) {
       {
         TimerLog ctf_tiles_timer("Generating ctfs for radius 1000");
         auto it = ctf_tile_generators.emplace(
@@ -1625,17 +1633,27 @@ class User {
         cv::imencode(".png", png_data, buffer);
         res.set_content(reinterpret_cast<const char*>(buffer.data()), buffer.size(), "image/png");
       });
+      for (User* user : meta_users) {
+        auto ingester = user->getActivityIngester().get();
+        if (ingester) {
+          ingester->addTilegenerators(tile_generators_);
+        }
+      }
+    } else {
+      ingester_ = std::make_unique<ActivityIngester>(getIngestFolder(), tile_generators_);
     }
-
-    ingester_ = std::make_unique<ActivityIngester>(getIngestFolder(), tile_generators_);
   }
 
   const std::vector<MatchedRoute>& getMatchedRoutes() const {
     return matched_routes;
   }
 
+  const std::unique_ptr<ActivityIngester>& getActivityIngester() const {
+    return ingester_;
+  }
+
  private:
-  bool has_coop_endpoints_ = false;
+  std::list<User*> meta_users;
   std::unique_ptr<ActivityIngester> ingester_;
   std::vector<MatchedRoute> matched_routes;
   std::mutex alpha_shapes_mutex;
