@@ -3,6 +3,7 @@
 #include <valhalla/tyr/actor.h>
 
 #include <algorithm>
+#include <array>
 #include <boost/property_tree/ptree.hpp>
 #include <cmath>
 #include <cstddef>
@@ -525,8 +526,13 @@ class AlphaShape {
     return boundary_edges_;
   }
 
+  const std::vector<std::array<Coordinate, 3>>& getFillTriangles() const {
+    return fill_triangles_;
+  }
+
   void compute() {
     boundary_edges_.clear();
+    fill_triangles_.clear();
     if (points_.size() < 3) {
       return;
     }
@@ -589,6 +595,11 @@ class AlphaShape {
         continue;
       }
 
+      auto [tlat1, tlon1] = metersToLatLon(p1.x, p1.y);
+      auto [tlat2, tlon2] = metersToLatLon(p2.x, p2.y);
+      auto [tlat3, tlon3] = metersToLatLon(p3.x, p3.y);
+      fill_triangles_.push_back({Coordinate{tlat1, tlon1}, Coordinate{tlat2, tlon2}, Coordinate{tlat3, tlon3}});
+
       for (const auto& [a, b] : {std::make_pair(p1, p2), std::make_pair(p2, p3), std::make_pair(p3, p1)}) {
         auto key = edge_key(a, b);
         edge_counts[key]++;
@@ -628,6 +639,7 @@ class AlphaShape {
   double alpha_;
   std::vector<std::pair<double, double>> points_;
   std::vector<std::pair<Coordinate, Coordinate>> boundary_edges_;
+  std::vector<std::array<Coordinate, 3>> fill_triangles_;
   std::vector<MatchedRoute> matched_routes_;
 };
 
@@ -839,12 +851,21 @@ class Tile {
 
   void paint(const AlphaShape& alpha_shape) {
     // paintRoute(alpha_shape.getMatchedRoutes());
+    auto toPixel = [this](const Coordinate& c) {
+      int x = static_cast<int>((c.lon - min_lon_) / (max_lon_ - min_lon_) * 256);
+      int y = static_cast<int>((max_lat_ - c.lat) / (max_lat_ - min_lat_) * 256);
+      return cv::Point(x, y);
+    };
+
+    // Fill each alpha-valid triangle without anti-aliasing so adjacent triangles don't leave
+    // visible seams where their antialiased edges overlap.
+    for (const auto& triangle : alpha_shape.getFillTriangles()) {
+      cv::Point pts[3] = {toPixel(triangle[0]), toPixel(triangle[1]), toPixel(triangle[2])};
+      cv::fillConvexPoly(image_data_, pts, 3, cv::Scalar(255, 0, 255, 80), cv::LINE_8);
+    }
+
     for (const auto& [p1, p2] : alpha_shape.getBoundaryEdges()) {
-      int x1 = static_cast<int>((p1.lon - min_lon_) / (max_lon_ - min_lon_) * 256);
-      int y1 = static_cast<int>((max_lat_ - p1.lat) / (max_lat_ - min_lat_) * 256);
-      int x2 = static_cast<int>((p2.lon - min_lon_) / (max_lon_ - min_lon_) * 256);
-      int y2 = static_cast<int>((max_lat_ - p2.lat) / (max_lat_ - min_lat_) * 256);
-      cv::line(image_data_, cv::Point(x1, y1), cv::Point(x2, y2), cv::Scalar(255, 0, 255, 200), 3, cv::LINE_AA);
+      cv::line(image_data_, toPixel(p1), toPixel(p2), cv::Scalar(255, 0, 255, 200), 3, cv::LINE_AA);
     }
   }
 
