@@ -795,10 +795,11 @@ class Tile {
     }
   }
 
-  void paint(const std::set<SquadratTile>& squadrat_tiles) {
+  void paint(const std::set<SquadratTile>& squadrat_tiles, bool inverse) {
     for (const auto& tile : squadrat_tiles) {
       auto polygon = hexToPixelPolygon(tile.getVertices());
-      cv::fillConvexPoly(image_data_, polygon, tile.getLastVisitColor(), cv::LINE_AA);
+      cv::fillConvexPoly(image_data_, polygon, inverse ? tile.getFirstVisitColor() : tile.getLastVisitColor(),
+                         cv::LINE_AA);
       // Print the age at the hex's centroid
       cv::Point center(0, 0);
       for (const auto& p : polygon) {
@@ -807,8 +808,9 @@ class Tile {
       center.x = center.x / static_cast<int>(polygon.size()) - 10;  // Center + shift text to be centered
       center.y = center.y / static_cast<int>(polygon.size()) + 5;
       if (z_ >= 11) {
-        cv::putText(image_data_, std::to_string((int)tile.getLastVisitAge()) + "d", center, cv::FONT_HERSHEY_SIMPLEX,
-                    0.4, cv::Scalar(0, 0, 0, 255), 1, cv::LINE_AA);
+        cv::putText(image_data_,
+                    std::to_string(inverse ? (int)tile.getFirstVisitAge() : (int)tile.getLastVisitAge()) + "d", center,
+                    cv::FONT_HERSHEY_SIMPLEX, 0.4, cv::Scalar(0, 0, 0, 255), 1, cv::LINE_AA);
       }
     }
   }
@@ -1193,8 +1195,8 @@ class AlphaShapeTileGenerator : public TileGenerator {
 
 class SquadratTileGenerator : public TileGenerator {
  public:
-  SquadratTileGenerator(const std::vector<MatchedRoute>& matched_routes, double tile_size_raw)
-      : tile_size_(meter2size(tile_size_raw)) {
+  SquadratTileGenerator(const std::vector<MatchedRoute>& matched_routes, double tile_size_raw, bool inverse = false)
+      : tile_size_(meter2size(tile_size_raw)), inverse_(inverse) {
     addRoutes(matched_routes);
   }
 
@@ -1214,7 +1216,7 @@ class SquadratTileGenerator : public TileGenerator {
     Tile tile(z, x, y);
     {
       std::shared_lock<std::shared_mutex> shared_lock(shared_mutex_);
-      tile.paint(squadrat_tiles_);
+      tile.paint(squadrat_tiles_, inverse_);
     }
     tile.paintGrid(tile_size_);
     return tile;
@@ -1224,6 +1226,7 @@ class SquadratTileGenerator : public TileGenerator {
   std::shared_mutex shared_mutex_;
   std::set<SquadratTile> squadrat_tiles_;
   double tile_size_;
+  bool inverse_;
 };
 
 class CTFTileGenerator : public SquadratTileGenerator {
@@ -1636,6 +1639,28 @@ class User {
       res.set_content(reinterpret_cast<const char*>(buffer.data()), buffer.size(), "image/png");
     });
 
+    inverse_squadrat_generator = std::make_unique<SquadratTileGenerator>(matched_routes, 1000, true);
+    tile_generators_.push_back(inverse_squadrat_generator.get());
+
+    svr.Get(url_path + R"(/squadrat_inverse/(\d+)/(\d+)/(\d+).png)",
+            [this](const httplib::Request& req, httplib::Response& res) {
+              // Heatmap XYZ tile request from url like /traversal/{z}/{x}/{y}.png
+              for (const auto& param : req.path_params) {
+                fprintf(stderr, "Path param: %s = %s\n", param.first.c_str(), param.second.c_str());
+              }
+              int z = std::stoi(req.matches[1]);
+              int x = std::stoi(req.matches[2]);
+              int y = std::stoi(req.matches[3]);
+              std::string user = req.has_param("user") ? req.get_param_value("user") : "";
+
+              // For now just return a placeholder PNG image (256x256 pixel)
+              Tile tile = inverse_squadrat_generator->getTile(z, x, y);
+              cv::Mat png_data = tile.getImage();
+              std::vector<unsigned char> buffer;
+              cv::imencode(".png", png_data, buffer);
+              res.set_content(reinterpret_cast<const char*>(buffer.data()), buffer.size(), "image/png");
+            });
+
     traversal_tile_generator = std::make_unique<TraversalTileGenerator>(matched_routes);
     tile_generators_.push_back(traversal_tile_generator.get());
 
@@ -1793,6 +1818,8 @@ class User {
   std::mutex local_legend_tiles_mutex;
 
   std::unique_ptr<TraversalTileGenerator> traversal_tile_generator;
+
+  std::unique_ptr<SquadratTileGenerator> inverse_squadrat_generator;
 
   std::unique_ptr<StravaHeatmapTileGenerator> heatmap_tile_generator;
 
