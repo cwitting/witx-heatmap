@@ -664,19 +664,12 @@ class Tile {
       for (size_t i = 1; i < segment.geometry.route.size(); ++i) {
         const auto& p1 = segment.geometry.route[i - 1];
         const auto& p2 = segment.geometry.route[i];
-        // fprintf(stderr, "Painting way %s (edge %llu) segment from (%.6f, %.6f) to (%.6f, %.6f)\n",
-        //         segment.way_id.c_str(), static_cast<unsigned long long>(segment.edge_id), p1.lat, p1.lon, p2.lat,
-        //         p2.lon);
-        int x1 = static_cast<int>((p1.lon - min_lon_) / (max_lon_ - min_lon_) * 256);
-        int y1 = static_cast<int>((max_lat_ - p1.lat) / (max_lat_ - min_lat_) * 256);
-        int x2 = static_cast<int>((p2.lon - min_lon_) / (max_lon_ - min_lon_) * 256);
-        int y2 = static_cast<int>((max_lat_ - p2.lat) / (max_lat_ - min_lat_) * 256);
         double age = segment.getLastVisitAge();  // days
         // double thickness = std::clamp(5.0 * (1.0 - age / 365.0), 1.0, 5.0);  // Clamp thickness between 1 and 5
         // pixels
         double thickness = 2.0;  // Default thickness for the line
-        cv::line(image_data_, cv::Point(x1, y1), cv::Point(x2, y2), segment.getLastVisitColor(),
-                 static_cast<int>(thickness), cv::LINE_AA);
+        cv::line(image_data_, toPixel(p1), toPixel(p2), segment.getLastVisitColor(), static_cast<int>(thickness),
+                 cv::LINE_AA);
       }
     }
     // fprintf(stderr, "Painted %d way segments on tile z=%d, x=%d, y=%d\n", count, z_, x_, y_);
@@ -708,15 +701,14 @@ class Tile {
       for (size_t i = 1; i < route.size(); ++i) {
         const auto& p1 = route[i - 1];
         const auto& p2 = route[i];
-        int x1 = static_cast<int>((p1.lon - min_lon_) / (max_lon_ - min_lon_) * 256);
-        int y1 = static_cast<int>((max_lat_ - p1.lat) / (max_lat_ - min_lat_) * 256);
-        int x2 = static_cast<int>((p2.lon - min_lon_) / (max_lon_ - min_lon_) * 256);
-        int y2 = static_cast<int>((max_lat_ - p2.lat) / (max_lat_ - min_lat_) * 256);
+        cv::Point p1_px = toPixel(p1);
+        cv::Point p2_px = toPixel(p2);
         // Skip segments that clearly miss this tile; cv::line clips the rest for us.
-        if ((x1 < -8 && x2 < -8) || (x1 > 264 && x2 > 264) || (y1 < -8 && y2 < -8) || (y1 > 264 && y2 > 264)) {
+        if ((p1_px.x < -8 && p2_px.x < -8) || (p1_px.x > 264 && p2_px.x > 264) || (p1_px.y < -8 && p2_px.y < -8) ||
+            (p1_px.y > 264 && p2_px.y > 264)) {
           continue;
         }
-        cv::line(route_mask, cv::Point(x1, y1), cv::Point(x2, y2), cv::Scalar(255), 1, cv::LINE_AA);
+        cv::line(route_mask, p1_px, p2_px, cv::Scalar(255), 1, cv::LINE_AA);
         drew_any = true;
       }
       if (drew_any) {
@@ -765,15 +757,7 @@ class Tile {
       for (size_t i = 1; i < matched_route.route.route.size(); ++i) {
         const auto& p1 = matched_route.route.route[i - 1];
         const auto& p2 = matched_route.route.route[i];
-        // fprintf(stderr, "Painting way %s (edge %llu) segment from (%.6f, %.6f) to (%.6f, %.6f)\n",
-        //         segment.way_id.c_str(), static_cast<unsigned long long>(segment.edge_id), p1.lat, p1.lon, p2.lat,
-        //         p2.lon);
-        int x1 = static_cast<int>((p1.lon - min_lon_) / (max_lon_ - min_lon_) * 256);
-        int y1 = static_cast<int>((max_lat_ - p1.lat) / (max_lat_ - min_lat_) * 256);
-        int x2 = static_cast<int>((p2.lon - min_lon_) / (max_lon_ - min_lon_) * 256);
-        int y2 = static_cast<int>((max_lat_ - p2.lat) / (max_lat_ - min_lat_) * 256);
-        int alpha = 255;  // Adjust the multiplier for desired opacity
-        cv::line(image_data_, cv::Point(x1, y1), cv::Point(x2, y2), cv::Scalar(255, 0, 0, 255), 2, cv::LINE_AA);
+        cv::line(image_data_, toPixel(p1), toPixel(p2), cv::Scalar(255, 0, 0, 255), 2, cv::LINE_AA);
       }
     }
     // fprintf(stderr, "Painted %d way segments on tile z=%d, x=%d, y=%d\n", count, z_, x_, y_);
@@ -853,12 +837,6 @@ class Tile {
 
   void paint(const AlphaShape& alpha_shape) {
     // paintRoute(alpha_shape.getMatchedRoutes());
-    auto toPixel = [this](const Coordinate& c) {
-      int x = static_cast<int>((c.lon - min_lon_) / (max_lon_ - min_lon_) * 256);
-      int y = static_cast<int>((max_lat_ - c.lat) / (max_lat_ - min_lat_) * 256);
-      return cv::Point(x, y);
-    };
-
     // Fill each alpha-valid triangle without anti-aliasing so adjacent triangles don't leave
     // visible seams where their antialiased edges overlap.
     for (const auto& triangle : alpha_shape.getFillTriangles()) {
@@ -904,9 +882,7 @@ class Tile {
     std::vector<cv::Point> polygon;
     polygon.reserve(vertices.size());
     for (const auto& v : vertices) {
-      int px = static_cast<int>((v.lon - min_lon_) / (max_lon_ - min_lon_) * 256);
-      int py = static_cast<int>((max_lat_ - v.lat) / (max_lat_ - min_lat_) * 256);
-      polygon.emplace_back(px, py);
+      polygon.push_back(toPixel(v));
     }
     return polygon;
   }
