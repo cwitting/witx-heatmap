@@ -1415,17 +1415,10 @@ static void registerTileRoute(httplib::Server& svr, const std::string& path_patt
           });
 }
 
-// Look up the generator for `radius`, lazily creating and caching one if it doesn't exist yet.
+// Look up the generator pre-created for `radius`; throws std::out_of_range for an unsupported radius.
 template <typename GeneratorT>
-static GeneratorT* getOrCreateByRadius(std::unordered_map<int, std::unique_ptr<GeneratorT>>& generators,
-                                       std::mutex& generators_mutex, int radius,
-                                       const std::vector<MatchedRoute>& matched_routes) {
-  auto it = generators.find(radius);
-  if (it == generators.end()) {
-    std::lock_guard<std::mutex> lock(generators_mutex);
-    it = generators.emplace(radius, std::make_unique<GeneratorT>(matched_routes, static_cast<double>(radius))).first;
-  }
-  return it->second.get();
+static GeneratorT* getByRadius(const std::unordered_map<int, std::unique_ptr<GeneratorT>>& generators, int radius) {
+  return generators.at(radius).get();
 }
 
 class User {
@@ -1553,7 +1546,7 @@ class User {
     std::string url_path = getUrlPath();
     registerTileRoute(svr, url_path + R"(/coverage/(\d+)/(\d+)/(\d+).png)", [this](const httplib::Request& req) {
       int radius = req.has_param("radius") ? std::stoi(req.get_param_value("radius")) : 0;
-      return getOrCreateByRadius(alpha_shapes, alpha_shapes_mutex, radius, matched_routes);
+      return getByRadius(alpha_shapes, radius);
     });
 
     {
@@ -1583,7 +1576,7 @@ class User {
 
     registerTileRoute(svr, url_path + R"(/squadrat/(\d+)/(\d+)/(\d+).png)", [this](const httplib::Request& req) {
       int radius = req.has_param("radius") ? std::stoi(req.get_param_value("radius")) : 0;
-      return getOrCreateByRadius(squadrat_tile_generators, squadrat_tiles_mutex, radius, matched_routes);
+      return getByRadius(squadrat_tile_generators, radius);
     });
 
     inverse_squadrat_generator = std::make_unique<SquadratTileGenerator>(matched_routes, 1000, true);
@@ -1614,7 +1607,7 @@ class User {
 
       registerTileRoute(svr, url_path + R"(/ctf/(\d+)/(\d+)/(\d+).png)", [this](const httplib::Request& req) {
         int radius = req.has_param("radius") ? std::stoi(req.get_param_value("radius")) : 0;
-        return getOrCreateByRadius(ctf_tile_generators, ctf_tiles_mutex, radius, matched_routes);
+        return getByRadius(ctf_tile_generators, radius);
       });
 
       {
@@ -1626,7 +1619,7 @@ class User {
 
       registerTileRoute(svr, url_path + R"(/local_legend/(\d+)/(\d+)/(\d+).png)", [this](const httplib::Request& req) {
         int radius = req.has_param("radius") ? std::stoi(req.get_param_value("radius")) : 0;
-        return getOrCreateByRadius(local_legend_tile_generators, local_legend_tiles_mutex, radius, matched_routes);
+        return getByRadius(local_legend_tile_generators, radius);
       });
 
       for (User* user : meta_users) {
@@ -1658,17 +1651,13 @@ class User {
   std::list<User*> meta_users;
   std::unique_ptr<ActivityIngester> ingester_;
   std::vector<MatchedRoute> matched_routes;
-  std::mutex alpha_shapes_mutex;
   std::unordered_map<int, std::unique_ptr<AlphaShapeTileGenerator>> alpha_shapes;
 
   std::unordered_map<int, std::unique_ptr<SquadratTileGenerator>> squadrat_tile_generators;
-  std::mutex squadrat_tiles_mutex;
 
   std::unordered_map<int, std::unique_ptr<CTFTileGenerator>> ctf_tile_generators;
-  std::mutex ctf_tiles_mutex;
 
   std::unordered_map<int, std::unique_ptr<LocalLegendTileGenerator>> local_legend_tile_generators;
-  std::mutex local_legend_tiles_mutex;
 
   std::unique_ptr<TraversalTileGenerator> traversal_tile_generator;
 
