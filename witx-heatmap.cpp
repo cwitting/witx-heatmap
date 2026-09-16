@@ -11,6 +11,7 @@
 #include <cstdio>
 #include <ctime>
 #include <fstream>
+#include <functional>
 #include <iostream>
 #include <limits>
 #include <map>
@@ -780,59 +781,25 @@ class Tile {
   }
 
   void paint(const std::set<SquadratTile>& squadrat_tiles, bool inverse) {
-    for (const auto& tile : squadrat_tiles) {
-      auto polygon = hexToPixelPolygon(tile.getVertices());
-      cv::fillConvexPoly(image_data_, polygon, inverse ? tile.getFirstVisitColor() : tile.getLastVisitColor(),
-                         cv::LINE_AA);
-      // Print the age at the hex's centroid
-      cv::Point center(0, 0);
-      for (const auto& p : polygon) {
-        center += p;
-      }
-      center.x = center.x / static_cast<int>(polygon.size()) - 10;  // Center + shift text to be centered
-      center.y = center.y / static_cast<int>(polygon.size()) + 5;
-      if (z_ >= 11) {
-        cv::putText(image_data_,
-                    std::to_string(inverse ? (int)tile.getFirstVisitAge() : (int)tile.getLastVisitAge()) + "d", center,
-                    cv::FONT_HERSHEY_SIMPLEX, 0.4, cv::Scalar(0, 0, 0, 255), 1, cv::LINE_AA);
-      }
-    }
+    paintSquadratTiles(
+        squadrat_tiles,
+        [inverse](const SquadratTile& tile) { return inverse ? tile.getFirstVisitColor() : tile.getLastVisitColor(); },
+        [inverse](const SquadratTile& tile) {
+          return std::to_string(inverse ? (int)tile.getFirstVisitAge() : (int)tile.getLastVisitAge()) + "d";
+        },
+        -10);
   }
 
   void paintCTF(const std::set<SquadratTile>& squadrat_tiles) {
-    for (const auto& tile : squadrat_tiles) {
-      auto polygon = hexToPixelPolygon(tile.getVertices());
-      cv::fillConvexPoly(image_data_, polygon, tile.getOwnerColor(), cv::LINE_AA);
-      // Print the age at the hex's centroid
-      cv::Point center(0, 0);
-      for (const auto& p : polygon) {
-        center += p;
-      }
-      center.x = center.x / static_cast<int>(polygon.size()) - 10;  // Center + shift text to be centered
-      center.y = center.y / static_cast<int>(polygon.size()) + 5;
-      if (z_ >= 11) {
-        cv::putText(image_data_, std::to_string((int)tile.getLastVisitAge()) + "d", center, cv::FONT_HERSHEY_SIMPLEX,
-                    0.4, cv::Scalar(0, 0, 0, 255), 1, cv::LINE_AA);
-      }
-    }
+    paintSquadratTiles(
+        squadrat_tiles, [](const SquadratTile& tile) { return tile.getOwnerColor(); },
+        [](const SquadratTile& tile) { return std::to_string((int)tile.getLastVisitAge()) + "d"; }, -10);
   }
 
   void paintLocalLegend(const std::set<SquadratTile>& squadrat_tiles) {
-    for (const auto& tile : squadrat_tiles) {
-      auto polygon = hexToPixelPolygon(tile.getVertices());
-      cv::fillConvexPoly(image_data_, polygon, tile.getLocalLegendColor(), cv::LINE_AA);
-      // Print the age at the hex's centroid
-      cv::Point center(0, 0);
-      for (const auto& p : polygon) {
-        center += p;
-      }
-      center.x = center.x / static_cast<int>(polygon.size()) - 5;  // Center + shift text to be centered
-      center.y = center.y / static_cast<int>(polygon.size()) + 5;
-      if (z_ >= 11) {
-        cv::putText(image_data_, std::to_string((int)tile.getMostVisitedCount()), center, cv::FONT_HERSHEY_SIMPLEX, 0.4,
-                    cv::Scalar(0, 0, 0, 255), 1, cv::LINE_AA);
-      }
-    }
+    paintSquadratTiles(
+        squadrat_tiles, [](const SquadratTile& tile) { return tile.getLocalLegendColor(); },
+        [](const SquadratTile& tile) { return std::to_string((int)tile.getMostVisitedCount()); }, -5);
   }
 
   void paint(const AlphaShape& alpha_shape) {
@@ -877,6 +844,34 @@ class Tile {
   }
 
  private:
+  // Fill each tile's hexagon and optionally label its centroid; used for the paint/paintCTF/paintLocalLegend variants
+  void paintSquadratTiles(const std::set<SquadratTile>& squadrat_tiles,
+                          const std::function<cv::Scalar(const SquadratTile&)>& color_fn,
+                          const std::function<std::string(const SquadratTile&)>& label_fn, int label_x_offset) {
+    for (const auto& tile : squadrat_tiles) {
+      auto polygon = hexToPixelPolygon(tile.getVertices());
+      cv::fillConvexPoly(image_data_, polygon, color_fn(tile), cv::LINE_AA);
+      // Print the label at the hex's centroid
+      cv::Point center(0, 0);
+      for (const auto& p : polygon) {
+        center += p;
+      }
+      center.x = center.x / static_cast<int>(polygon.size()) + label_x_offset;  // Center + shift text to be centered
+      center.y = center.y / static_cast<int>(polygon.size()) + 5;
+      if (z_ >= 11) {
+        cv::putText(image_data_, label_fn(tile), center, cv::FONT_HERSHEY_SIMPLEX, 0.4, cv::Scalar(0, 0, 0, 255), 1,
+                    cv::LINE_AA);
+      }
+    }
+  }
+
+  // Project a lat/lon coordinate to pixel coordinates within this tile's 256x256 image
+  cv::Point toPixel(const Coordinate& c) const {
+    int x = static_cast<int>((c.lon - min_lon_) / (max_lon_ - min_lon_) * 256);
+    int y = static_cast<int>((max_lat_ - c.lat) / (max_lat_ - min_lat_) * 256);
+    return cv::Point(x, y);
+  }
+
   // Project hexagon corners (lat/lon) to pixel coordinates within this tile's 256x256 image
   std::vector<cv::Point> hexToPixelPolygon(const std::vector<Coordinate>& vertices) const {
     std::vector<cv::Point> polygon;
