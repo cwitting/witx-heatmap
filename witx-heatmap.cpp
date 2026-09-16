@@ -1401,6 +1401,38 @@ class ActivityIngester {
   std::vector<TileGenerator*> tile_generators_;
 };
 
+// Register a "/.../{z}/{x}/{y}.png" XYZ tile endpoint; `get_tile_generator` picks which generator serves each request.
+static void registerTileRoute(httplib::Server& svr, const std::string& path_pattern,
+                              std::function<TileGenerator*(const httplib::Request&)> get_tile_generator) {
+  svr.Get(path_pattern,
+          [get_tile_generator = std::move(get_tile_generator)](const httplib::Request& req, httplib::Response& res) {
+            for (const auto& param : req.path_params) {
+              fprintf(stderr, "Path param: %s = %s\n", param.first.c_str(), param.second.c_str());
+            }
+            int z = std::stoi(req.matches[1]);
+            int x = std::stoi(req.matches[2]);
+            int y = std::stoi(req.matches[3]);
+            Tile tile = get_tile_generator(req)->getTile(z, x, y);
+            cv::Mat png_data = tile.getImage();
+            std::vector<unsigned char> buffer;
+            cv::imencode(".png", png_data, buffer);
+            res.set_content(reinterpret_cast<const char*>(buffer.data()), buffer.size(), "image/png");
+          });
+}
+
+// Look up the generator for `radius`, lazily creating and caching one if it doesn't exist yet.
+template <typename GeneratorT>
+static GeneratorT* getOrCreateByRadius(std::unordered_map<int, std::unique_ptr<GeneratorT>>& generators,
+                                       std::mutex& generators_mutex, int radius,
+                                       const std::vector<MatchedRoute>& matched_routes) {
+  auto it = generators.find(radius);
+  if (it == generators.end()) {
+    std::lock_guard<std::mutex> lock(generators_mutex);
+    it = generators.emplace(radius, std::make_unique<GeneratorT>(matched_routes, static_cast<double>(radius))).first;
+  }
+  return it->second.get();
+}
+
 class User {
  public:
   std::string name;
@@ -1524,34 +1556,10 @@ class User {
 
     // Main route planning endpoint
     std::string url_path = getUrlPath();
-    svr.Get(
-        url_path + R"(/coverage/(\d+)/(\d+)/(\d+).png)", [this](const httplib::Request& req, httplib::Response& res) {
-          // Heatmap XYZ tile request from url like /tiles/{z}/{x}/{y}.png
-          for (const auto& param : req.path_params) {
-            fprintf(stderr, "Path param: %s = %s\n", param.first.c_str(), param.second.c_str());
-          }
-          int z = std::stoi(req.matches[1]);
-          int x = std::stoi(req.matches[2]);
-          int y = std::stoi(req.matches[3]);
-          std::string user = req.has_param("user") ? req.get_param_value("user") : "";
-          int radius = req.has_param("radius") ? std::stoi(req.get_param_value("radius")) : 0;
-          // fprintf(stderr, "Received tile request for z=%d, x=%d, y=%d\n", z, x, y);
-
-          // For now just return a placeholder PNG image (256x256 pixel)
-          auto it = alpha_shapes.find(radius);
-          if (it == alpha_shapes.end()) {
-            std::lock_guard<std::mutex> lock(alpha_shapes_mutex);
-            it = alpha_shapes
-                     .emplace(radius,
-                              std::make_unique<AlphaShapeTileGenerator>(matched_routes, static_cast<double>(radius)))
-                     .first;
-          }
-          Tile tile = it->second->getTile(z, x, y);
-          cv::Mat png_data = tile.getImage();
-          std::vector<unsigned char> buffer;
-          cv::imencode(".png", png_data, buffer);
-          res.set_content(reinterpret_cast<const char*>(buffer.data()), buffer.size(), "image/png");
-        });
+    registerTileRoute(svr, url_path + R"(/coverage/(\d+)/(\d+)/(\d+).png)", [this](const httplib::Request& req) {
+      int radius = req.has_param("radius") ? std::stoi(req.get_param_value("radius")) : 0;
+      return getOrCreateByRadius(alpha_shapes, alpha_shapes_mutex, radius, matched_routes);
+    });
 
     {
       TimerLog squadrat_tiles_timer("Generating squadrats for radius 500");
@@ -1578,99 +1586,28 @@ class User {
       tile_generators_.push_back(it.first->second.get());
     }
 
-    svr.Get(url_path + R"(/squadrat/(\d+)/(\d+)/(\d+).png)", [this](const httplib::Request& req,
-                                                                    httplib::Response& res) {
-      // Heatmap XYZ tile request from url like /tiles/{z}/{x}/{y}.png
-      for (const auto& param : req.path_params) {
-        fprintf(stderr, "Path param: %s = %s\n", param.first.c_str(), param.second.c_str());
-      }
-      int z = std::stoi(req.matches[1]);
-      int x = std::stoi(req.matches[2]);
-      int y = std::stoi(req.matches[3]);
-      std::string user = req.has_param("user") ? req.get_param_value("user") : "";
+    registerTileRoute(svr, url_path + R"(/squadrat/(\d+)/(\d+)/(\d+).png)", [this](const httplib::Request& req) {
       int radius = req.has_param("radius") ? std::stoi(req.get_param_value("radius")) : 0;
-      // fprintf(stderr, "Received tile request for z=%d, x=%d, y=%d\n", z, x, y);
-
-      // For now just return a placeholder PNG image (256x256 pixel)
-      auto it = squadrat_tile_generators.find(radius);
-      if (it == squadrat_tile_generators.end()) {
-        std::lock_guard<std::mutex> lock(squadrat_tiles_mutex);
-        it = squadrat_tile_generators
-                 .emplace(radius, std::make_unique<SquadratTileGenerator>(matched_routes, static_cast<double>(radius)))
-                 .first;
-      }
-      Tile tile = it->second->getTile(z, x, y);
-      cv::Mat png_data = tile.getImage();
-      std::vector<unsigned char> buffer;
-      cv::imencode(".png", png_data, buffer);
-      res.set_content(reinterpret_cast<const char*>(buffer.data()), buffer.size(), "image/png");
+      return getOrCreateByRadius(squadrat_tile_generators, squadrat_tiles_mutex, radius, matched_routes);
     });
 
     inverse_squadrat_generator = std::make_unique<SquadratTileGenerator>(matched_routes, 1000, true);
     tile_generators_.push_back(inverse_squadrat_generator.get());
 
-    svr.Get(url_path + R"(/squadrat_inverse/(\d+)/(\d+)/(\d+).png)",
-            [this](const httplib::Request& req, httplib::Response& res) {
-              // Heatmap XYZ tile request from url like /traversal/{z}/{x}/{y}.png
-              for (const auto& param : req.path_params) {
-                fprintf(stderr, "Path param: %s = %s\n", param.first.c_str(), param.second.c_str());
-              }
-              int z = std::stoi(req.matches[1]);
-              int x = std::stoi(req.matches[2]);
-              int y = std::stoi(req.matches[3]);
-              std::string user = req.has_param("user") ? req.get_param_value("user") : "";
-
-              // For now just return a placeholder PNG image (256x256 pixel)
-              Tile tile = inverse_squadrat_generator->getTile(z, x, y);
-              cv::Mat png_data = tile.getImage();
-              std::vector<unsigned char> buffer;
-              cv::imencode(".png", png_data, buffer);
-              res.set_content(reinterpret_cast<const char*>(buffer.data()), buffer.size(), "image/png");
-            });
+    registerTileRoute(svr, url_path + R"(/squadrat_inverse/(\d+)/(\d+)/(\d+).png)",
+                      [this](const httplib::Request&) { return inverse_squadrat_generator.get(); });
 
     traversal_tile_generator = std::make_unique<TraversalTileGenerator>(matched_routes);
     tile_generators_.push_back(traversal_tile_generator.get());
 
-    svr.Get(url_path + R"(/traversal/(\d+)/(\d+)/(\d+).png)",
-            [this](const httplib::Request& req, httplib::Response& res) {
-              // Heatmap XYZ tile request from url like /traversal/{z}/{x}/{y}.png
-              for (const auto& param : req.path_params) {
-                fprintf(stderr, "Path param: %s = %s\n", param.first.c_str(), param.second.c_str());
-              }
-              int z = std::stoi(req.matches[1]);
-              int x = std::stoi(req.matches[2]);
-              int y = std::stoi(req.matches[3]);
-              std::string user = req.has_param("user") ? req.get_param_value("user") : "";
-
-              // For now just return a placeholder PNG image (256x256 pixel)
-              Tile tile = traversal_tile_generator->getTile(z, x, y);
-              cv::Mat png_data = tile.getImage();
-              std::vector<unsigned char> buffer;
-              cv::imencode(".png", png_data, buffer);
-              res.set_content(reinterpret_cast<const char*>(buffer.data()), buffer.size(), "image/png");
-            });
+    registerTileRoute(svr, url_path + R"(/traversal/(\d+)/(\d+)/(\d+).png)",
+                      [this](const httplib::Request&) { return traversal_tile_generator.get(); });
 
     heatmap_tile_generator = std::make_unique<StravaHeatmapTileGenerator>(matched_routes);
     tile_generators_.push_back(heatmap_tile_generator.get());
 
-    svr.Get(url_path + R"(/heatmap/(\d+)/(\d+)/(\d+).png)",
-            [this](const httplib::Request& req, httplib::Response& res) {
-              // Heatmap XYZ tile request from url like /heatmap/{z}/{x}/{y}.png
-              for (const auto& param : req.path_params) {
-                fprintf(stderr, "Path param: %s = %s\n", param.first.c_str(), param.second.c_str());
-              }
-              int z = std::stoi(req.matches[1]);
-              int x = std::stoi(req.matches[2]);
-              int y = std::stoi(req.matches[3]);
-              std::string user = req.has_param("user") ? req.get_param_value("user") : "";
-
-              // For now just return a placeholder PNG image (256x256 pixel)
-              Tile tile = heatmap_tile_generator->getTile(z, x, y);
-              cv::Mat png_data = tile.getImage();
-              std::vector<unsigned char> buffer;
-              cv::imencode(".png", png_data, buffer);
-              res.set_content(reinterpret_cast<const char*>(buffer.data()), buffer.size(), "image/png");
-            });
+    registerTileRoute(svr, url_path + R"(/heatmap/(\d+)/(\d+)/(\d+).png)",
+                      [this](const httplib::Request&) { return heatmap_tile_generator.get(); });
 
     if (!meta_users.empty()) {
       {
@@ -1680,31 +1617,9 @@ class User {
         tile_generators_.push_back(ctf_tile_generators.find(1000)->second.get());
       }
 
-      svr.Get(url_path + R"(/ctf/(\d+)/(\d+)/(\d+).png)", [this](const httplib::Request& req, httplib::Response& res) {
-        // Heatmap XYZ tile request from url like /tiles/{z}/{x}/{y}.png
-        for (const auto& param : req.path_params) {
-          fprintf(stderr, "Path param: %s = %s\n", param.first.c_str(), param.second.c_str());
-        }
-        int z = std::stoi(req.matches[1]);
-        int x = std::stoi(req.matches[2]);
-        int y = std::stoi(req.matches[3]);
-        std::string user = req.has_param("user") ? req.get_param_value("user") : "";
+      registerTileRoute(svr, url_path + R"(/ctf/(\d+)/(\d+)/(\d+).png)", [this](const httplib::Request& req) {
         int radius = req.has_param("radius") ? std::stoi(req.get_param_value("radius")) : 0;
-        // fprintf(stderr, "Received tile request for z=%d, x=%d, y=%d\n", z, x, y);
-
-        // For now just return a placeholder PNG image (256x256 pixel)
-        auto it = ctf_tile_generators.find(radius);
-        if (it == ctf_tile_generators.end()) {
-          std::lock_guard<std::mutex> lock(squadrat_tiles_mutex);
-          it = ctf_tile_generators
-                   .emplace(radius, std::make_unique<CTFTileGenerator>(matched_routes, static_cast<double>(radius)))
-                   .first;
-        }
-        Tile tile = it->second->getTile(z, x, y);
-        cv::Mat png_data = tile.getImage();
-        std::vector<unsigned char> buffer;
-        cv::imencode(".png", png_data, buffer);
-        res.set_content(reinterpret_cast<const char*>(buffer.data()), buffer.size(), "image/png");
+        return getOrCreateByRadius(ctf_tile_generators, ctf_tiles_mutex, radius, matched_routes);
       });
 
       {
@@ -1714,34 +1629,10 @@ class User {
         tile_generators_.push_back(local_legend_tile_generators.find(1000)->second.get());
       }
 
-      svr.Get(url_path + R"(/local_legend/(\d+)/(\d+)/(\d+).png)",
-              [this](const httplib::Request& req, httplib::Response& res) {
-                // Heatmap XYZ tile request from url like /tiles/{z}/{x}/{y}.png
-                for (const auto& param : req.path_params) {
-                  fprintf(stderr, "Path param: %s = %s\n", param.first.c_str(), param.second.c_str());
-                }
-                int z = std::stoi(req.matches[1]);
-                int x = std::stoi(req.matches[2]);
-                int y = std::stoi(req.matches[3]);
-                std::string user = req.has_param("user") ? req.get_param_value("user") : "";
-                int radius = req.has_param("radius") ? std::stoi(req.get_param_value("radius")) : 0;
-                // fprintf(stderr, "Received tile request for z=%d, x=%d, y=%d\n", z, x, y);
-
-                // For now just return a placeholder PNG image (256x256 pixel)
-                auto it = local_legend_tile_generators.find(radius);
-                if (it == local_legend_tile_generators.end()) {
-                  std::lock_guard<std::mutex> lock(squadrat_tiles_mutex);
-                  it = local_legend_tile_generators
-                           .emplace(radius, std::make_unique<LocalLegendTileGenerator>(matched_routes,
-                                                                                       static_cast<double>(radius)))
-                           .first;
-                }
-                Tile tile = it->second->getTile(z, x, y);
-                cv::Mat png_data = tile.getImage();
-                std::vector<unsigned char> buffer;
-                cv::imencode(".png", png_data, buffer);
-                res.set_content(reinterpret_cast<const char*>(buffer.data()), buffer.size(), "image/png");
-              });
+      registerTileRoute(svr, url_path + R"(/local_legend/(\d+)/(\d+)/(\d+).png)", [this](const httplib::Request& req) {
+        int radius = req.has_param("radius") ? std::stoi(req.get_param_value("radius")) : 0;
+        return getOrCreateByRadius(local_legend_tile_generators, local_legend_tiles_mutex, radius, matched_routes);
+      });
 
       for (User* user : meta_users) {
         auto ingester = user->getActivityIngester().get();
