@@ -1132,8 +1132,6 @@ class TileKey {
 
 class TileGenerator {
  public:
-  virtual Tile generateTile(int z, int x, int y) = 0;
-
   Tile getTile(int z, int x, int y) {
     TileKey key(z, x, y);
     {
@@ -1163,7 +1161,26 @@ class TileGenerator {
 
   virtual void addRoutes(const std::vector<MatchedRoute>& matched_routes) = 0;
 
+ protected:
+  // Renders this generator's data onto `tile`; called under a shared (read) lock on shared_mutex_
+  virtual void paintTile(Tile& tile) const = 0;
+  // Optional unlocked post-processing step (e.g. drawing the squadrat grid)
+  virtual void afterPaint(Tile& tile) const {
+  }
+
+  mutable std::shared_mutex shared_mutex_;
+
  private:
+  Tile generateTile(int z, int x, int y) {
+    Tile tile(z, x, y);
+    {
+      std::shared_lock<std::shared_mutex> shared_lock(shared_mutex_);
+      paintTile(tile);
+    }
+    afterPaint(tile);
+    return tile;
+  }
+
   std::mutex cache_mutex_;
   std::unordered_map<TileKey, Tile, TileKey::Hash> tile_cache_;
 };
@@ -1179,17 +1196,12 @@ class AlphaShapeTileGenerator : public TileGenerator {
     alpha_shape_.addRoutes(matched_routes);
   }
 
-  Tile generateTile(int z, int x, int y) override {
-    Tile tile(z, x, y);
-    {
-      std::shared_lock<std::shared_mutex> shared_lock(shared_mutex_);
-      tile.paint(alpha_shape_);
-    }
-    return tile;
+ protected:
+  void paintTile(Tile& tile) const override {
+    tile.paint(alpha_shape_);
   }
 
  private:
-  std::shared_mutex shared_mutex_;
   AlphaShape alpha_shape_;
 };
 
@@ -1212,18 +1224,15 @@ class SquadratTileGenerator : public TileGenerator {
     clearCache();
   }
 
-  Tile generateTile(int z, int x, int y) override {
-    Tile tile(z, x, y);
-    {
-      std::shared_lock<std::shared_mutex> shared_lock(shared_mutex_);
-      tile.paint(squadrat_tiles_, inverse_);
-    }
-    tile.paintGrid(tile_size_);
-    return tile;
+ protected:
+  void paintTile(Tile& tile) const override {
+    tile.paint(squadrat_tiles_, inverse_);
   }
 
- protected:
-  std::shared_mutex shared_mutex_;
+  void afterPaint(Tile& tile) const override {
+    tile.paintGrid(tile_size_);
+  }
+
   std::set<SquadratTile> squadrat_tiles_;
   double tile_size_;
   bool inverse_;
@@ -1231,27 +1240,19 @@ class SquadratTileGenerator : public TileGenerator {
 
 class CTFTileGenerator : public SquadratTileGenerator {
   using SquadratTileGenerator::SquadratTileGenerator;
-  Tile generateTile(int z, int x, int y) override {
-    Tile tile(z, x, y);
-    {
-      std::shared_lock<std::shared_mutex> shared_lock(shared_mutex_);
-      tile.paintCTF(squadrat_tiles_);
-    }
-    tile.paintGrid(tile_size_);
-    return tile;
+
+ protected:
+  void paintTile(Tile& tile) const override {
+    tile.paintCTF(squadrat_tiles_);
   }
 };
 
 class LocalLegendTileGenerator : public SquadratTileGenerator {
   using SquadratTileGenerator::SquadratTileGenerator;
-  Tile generateTile(int z, int x, int y) override {
-    Tile tile(z, x, y);
-    {
-      std::shared_lock<std::shared_mutex> shared_lock(shared_mutex_);
-      tile.paintLocalLegend(squadrat_tiles_);
-    }
-    tile.paintGrid(tile_size_);
-    return tile;
+
+ protected:
+  void paintTile(Tile& tile) const override {
+    tile.paintLocalLegend(squadrat_tiles_);
   }
 };
 
@@ -1286,17 +1287,12 @@ class TraversalTileGenerator : public TileGenerator {
     clearCache();
   }
 
-  Tile generateTile(int z, int x, int y) override {
-    Tile tile(z, x, y);
-    {
-      std::shared_lock<std::shared_mutex> shared_lock(shared_mutex_);
-      tile.paintMatches(traversal_counts_);
-    }
-    return tile;
+ protected:
+  void paintTile(Tile& tile) const override {
+    tile.paintMatches(traversal_counts_);
   }
 
  private:
-  std::shared_mutex shared_mutex_;
   std::vector<WaySegment> traversal_counts_;
 };
 
@@ -1312,17 +1308,12 @@ class StravaHeatmapTileGenerator : public TileGenerator {
     clearCache();
   }
 
-  Tile generateTile(int z, int x, int y) override {
-    Tile tile(z, x, y);
-    {
-      std::shared_lock<std::shared_mutex> shared_lock(shared_mutex_);
-      tile.paintHeatmap(matched_routes_);
-    }
-    return tile;
+ protected:
+  void paintTile(Tile& tile) const override {
+    tile.paintHeatmap(matched_routes_);
   }
 
  private:
-  std::shared_mutex shared_mutex_;
   std::vector<MatchedRoute> matched_routes_;
 };
 
