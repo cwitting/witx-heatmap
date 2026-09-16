@@ -56,3 +56,4 @@ BreakConstructorInitializersBeforeComma: true
 
 AllowShortBlocksOnASingleLine: Never
 AllowShortFunctionsOnASingleLine: None
+AllowShortLambdasOnASingleLine: None

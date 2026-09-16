@@ -783,7 +783,9 @@ class Tile {
   void paint(const std::set<SquadratTile>& squadrat_tiles, bool inverse) {
     paintSquadratTiles(
         squadrat_tiles,
-        [inverse](const SquadratTile& tile) { return inverse ? tile.getFirstVisitColor() : tile.getLastVisitColor(); },
+        [inverse](const SquadratTile& tile) {
+          return inverse ? tile.getFirstVisitColor() : tile.getLastVisitColor();
+        },
         [inverse](const SquadratTile& tile) {
           return std::to_string(inverse ? (int)tile.getFirstVisitAge() : (int)tile.getLastVisitAge()) + "d";
         },
@@ -792,14 +794,26 @@ class Tile {
 
   void paintCTF(const std::set<SquadratTile>& squadrat_tiles) {
     paintSquadratTiles(
-        squadrat_tiles, [](const SquadratTile& tile) { return tile.getOwnerColor(); },
-        [](const SquadratTile& tile) { return std::to_string((int)tile.getLastVisitAge()) + "d"; }, -10);
+        squadrat_tiles,
+        [](const SquadratTile& tile) {
+          return tile.getOwnerColor();
+        },
+        [](const SquadratTile& tile) {
+          return std::to_string((int)tile.getLastVisitAge()) + "d";
+        },
+        -10);
   }
 
   void paintLocalLegend(const std::set<SquadratTile>& squadrat_tiles) {
     paintSquadratTiles(
-        squadrat_tiles, [](const SquadratTile& tile) { return tile.getLocalLegendColor(); },
-        [](const SquadratTile& tile) { return std::to_string((int)tile.getMostVisitedCount()); }, -5);
+        squadrat_tiles,
+        [](const SquadratTile& tile) {
+          return tile.getLocalLegendColor();
+        },
+        [](const SquadratTile& tile) {
+          return std::to_string((int)tile.getMostVisitedCount());
+        },
+        -5);
   }
 
   void paint(const AlphaShape& alpha_shape) {
@@ -1253,8 +1267,9 @@ class TraversalTileGenerator : public TileGenerator {
     for (const auto& [key, segment] : traversal_counts) {
       traversal_counts_.push_back(segment);
     }
-    std::sort(traversal_counts_.begin(), traversal_counts_.end(),
-              [](const WaySegment& a, const WaySegment& b) { return a.getLastVisitTime() < b.getLastVisitTime(); });
+    std::sort(traversal_counts_.begin(), traversal_counts_.end(), [](const WaySegment& a, const WaySegment& b) {
+      return a.getLastVisitTime() < b.getLastVisitTime();
+    });
     clearCache();
   }
 
@@ -1481,7 +1496,9 @@ class User {
   }
   std::string getUrlPath() const {
     std::string url_path = name;
-    std::transform(url_path.begin(), url_path.end(), url_path.begin(), [](unsigned char c) { return std::tolower(c); });
+    std::transform(url_path.begin(), url_path.end(), url_path.begin(), [](unsigned char c) {
+      return std::tolower(c);
+    });
     return "/" + url_path;
   }
 
@@ -1582,20 +1599,23 @@ class User {
     inverse_squadrat_generator = std::make_unique<SquadratTileGenerator>(matched_routes, 1000, true);
     tile_generators_.push_back(inverse_squadrat_generator.get());
 
-    registerTileRoute(svr, url_path + R"(/squadrat_inverse/(\d+)/(\d+)/(\d+).png)",
-                      [this](const httplib::Request&) { return inverse_squadrat_generator.get(); });
+    registerTileRoute(svr, url_path + R"(/squadrat_inverse/(\d+)/(\d+)/(\d+).png)", [this](const httplib::Request&) {
+      return inverse_squadrat_generator.get();
+    });
 
     traversal_tile_generator = std::make_unique<TraversalTileGenerator>(matched_routes);
     tile_generators_.push_back(traversal_tile_generator.get());
 
-    registerTileRoute(svr, url_path + R"(/traversal/(\d+)/(\d+)/(\d+).png)",
-                      [this](const httplib::Request&) { return traversal_tile_generator.get(); });
+    registerTileRoute(svr, url_path + R"(/traversal/(\d+)/(\d+)/(\d+).png)", [this](const httplib::Request&) {
+      return traversal_tile_generator.get();
+    });
 
     heatmap_tile_generator = std::make_unique<StravaHeatmapTileGenerator>(matched_routes);
     tile_generators_.push_back(heatmap_tile_generator.get());
 
-    registerTileRoute(svr, url_path + R"(/heatmap/(\d+)/(\d+)/(\d+).png)",
-                      [this](const httplib::Request&) { return heatmap_tile_generator.get(); });
+    registerTileRoute(svr, url_path + R"(/heatmap/(\d+)/(\d+)/(\d+).png)", [this](const httplib::Request&) {
+      return heatmap_tile_generator.get();
+    });
 
     if (!meta_users.empty()) {
       {
