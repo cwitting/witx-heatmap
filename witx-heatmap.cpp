@@ -96,6 +96,14 @@ static std::unordered_map<std::string, cv::Scalar> user_colors = {
     {THOMAS_ID, cv::Scalar(0, 0, 255, 130)}      // red
 };
 
+static cv::Scalar colorForAthlete(const std::string& athlete_id) {
+  auto it = user_colors.find(athlete_id);
+  if (it != user_colors.end()) {
+    return it->second;
+  }
+  return cv::Scalar(128, 128, 128, 130);  // default color if not found
+}
+
 cv::Scalar color_map(double value, std::vector<cv::Scalar> colors) {
   if (colors.empty()) {
     return cv::Scalar(0, 0, 0, 200);  // default to black if no colors provided
@@ -307,11 +315,7 @@ struct SquadratTile {
   }
 
   cv::Scalar getOwnerColor() const {
-    auto it = user_colors.find(last_athlete_id);
-    if (it != user_colors.end()) {
-      return it->second;
-    }
-    return cv::Scalar(128, 128, 128, 130);  // default color if not found
+    return colorForAthlete(last_athlete_id);
   }
 
   cv::Scalar getLocalLegendColor() const {
@@ -323,11 +327,7 @@ struct SquadratTile {
         most_visited_athlete = athlete_id;
       }
     }
-    auto it = user_colors.find(most_visited_athlete);
-    if (it != user_colors.end()) {
-      return it->second;
-    }
-    return cv::Scalar(128, 128, 128, 130);  // default color if not found
+    return colorForAthlete(most_visited_athlete);
   }
 
   int getMostVisitedCount() const {
@@ -338,6 +338,15 @@ struct SquadratTile {
       }
     }
     return static_cast<int>(max_visits);
+  }
+
+  // Activity count per athlete for this tile, keyed by athlete_id in sorted order for deterministic pie-slice layout
+  std::map<std::string, int> getVisitCountsByAthlete() const {
+    std::map<std::string, int> counts;
+    for (const auto& [athlete_id, activities] : visited_activity_ids) {
+      counts[athlete_id] = static_cast<int>(activities.size());
+    }
+    return counts;
   }
 
   // Get the 6 corners of the hexagon in lat/lon degrees
@@ -816,6 +825,83 @@ class Tile {
         -5);
   }
 
+  // Fill each hex with a pie chart of per-athlete visit share, clipped to the hex outline
+  void paintPieChart(const std::set<SquadratTile>& squadrat_tiles) {
+    cv::Rect img_rect(0, 0, image_data_.cols, image_data_.rows);
+    for (const auto& tile : squadrat_tiles) {
+      auto counts = tile.getVisitCountsByAthlete();
+      int total = 0;
+      for (const auto& [athlete_id, count] : counts) {
+        total += count;
+      }
+      if (total == 0) {
+        continue;
+      }
+
+      auto polygon = hexToPixelPolygon(tile.getVertices());
+      cv::Rect bounds = cv::boundingRect(polygon);
+      cv::Rect visible = bounds & img_rect;
+      if (visible.width <= 0 || visible.height <= 0) {
+        continue;
+      }
+
+      cv::Point center(0, 0);
+      for (const auto& p : polygon) {
+        center += p;
+      }
+      center.x /= static_cast<int>(polygon.size());
+      center.y /= static_cast<int>(polygon.size());
+
+      double radius = 0.0;
+      for (const auto& p : polygon) {
+        radius = std::max(radius, cv::norm(p - center));
+      }
+
+      std::vector<cv::Point> local_polygon;
+      local_polygon.reserve(polygon.size());
+      for (const auto& p : polygon) {
+        local_polygon.push_back(p - bounds.tl());
+      }
+      cv::Point local_center = center - bounds.tl();
+
+      cv::Mat mask(bounds.height, bounds.width, CV_8UC1, cv::Scalar(0));
+      cv::fillConvexPoly(mask, local_polygon, cv::Scalar(255), cv::LINE_AA);
+
+      cv::Mat wedge_layer(bounds.height, bounds.width, CV_8UC4, cv::Scalar(0, 0, 0, 0));
+      double start_angle = -90.0;  // slices start at the top and sweep clockwise
+      std::vector<std::pair<std::string, std::pair<double, double>>> slice_angles;
+      for (const auto& [athlete_id, count] : counts) {
+        double sweep = 360.0 * count / total;
+        double end_angle = start_angle + sweep;
+        cv::ellipse(wedge_layer, local_center, cv::Size(cvRound(radius), cvRound(radius)), 0, start_angle, end_angle,
+                    colorForAthlete(athlete_id), cv::FILLED, cv::LINE_AA);
+        slice_angles.emplace_back(athlete_id, std::make_pair(start_angle, end_angle));
+        start_angle = end_angle;
+      }
+
+      cv::Rect local_visible(visible.x - bounds.x, visible.y - bounds.y, visible.width, visible.height);
+      wedge_layer(local_visible).copyTo(image_data_(visible), mask(local_visible));
+
+      if (z_ >= 11) {
+        cv::putText(image_data_, std::to_string(total), center + cv::Point(-6, 5), cv::FONT_HERSHEY_SIMPLEX, 0.4,
+                    cv::Scalar(0, 0, 0, 255), 1, cv::LINE_AA);
+        for (const auto& [athlete_id, angles] : slice_angles) {
+          double fraction = (angles.second - angles.first) / 360.0;
+          if (fraction <= 0.10) {
+            continue;
+          }
+          double mid_angle_rad = (angles.first + angles.second) / 2.0 * M_PI / 180.0;
+          double label_radius = radius * 0.6;
+          cv::Point label_pos = center + cv::Point(static_cast<int>(label_radius * std::cos(mid_angle_rad)),
+                                                   static_cast<int>(label_radius * std::sin(mid_angle_rad)));
+          std::string pct_text = std::to_string(static_cast<int>(std::round(fraction * 100))) + "%";
+          cv::putText(image_data_, pct_text, label_pos, cv::FONT_HERSHEY_SIMPLEX, 0.35, cv::Scalar(255, 255, 255, 255),
+                      1, cv::LINE_AA);
+        }
+      }
+    }
+  }
+
   void paint(const AlphaShape& alpha_shape) {
     // paintRoute(alpha_shape.getMatchedRoutes());
     // Fill each alpha-valid triangle without anti-aliasing so adjacent triangles don't leave
@@ -1241,6 +1327,15 @@ class LocalLegendTileGenerator : public SquadratTileGenerator {
   }
 };
 
+class PieChartTileGenerator : public SquadratTileGenerator {
+  using SquadratTileGenerator::SquadratTileGenerator;
+
+ protected:
+  void paintTile(Tile& tile) const override {
+    tile.paintPieChart(squadrat_tiles_);
+  }
+};
+
 class TraversalTileGenerator : public TileGenerator {
  public:
   TraversalTileGenerator(const std::vector<MatchedRoute>& matched_routes) {
@@ -1642,6 +1737,18 @@ class User {
         return getByRadius(local_legend_tile_generators, radius);
       });
 
+      {
+        TimerLog pie_chart_tiles_timer("Generating pie_charts for radius 1000");
+        auto it = pie_chart_tile_generators.emplace(
+            1000, std::make_unique<PieChartTileGenerator>(matched_routes, static_cast<double>(1000)));
+        tile_generators_.push_back(pie_chart_tile_generators.find(1000)->second.get());
+      }
+
+      registerTileRoute(svr, url_path + R"(/pie_chart/(\d+)/(\d+)/(\d+).png)", [this](const httplib::Request& req) {
+        int radius = req.has_param("radius") ? std::stoi(req.get_param_value("radius")) : 0;
+        return getByRadius(pie_chart_tile_generators, radius);
+      });
+
       for (User* user : meta_users) {
         auto ingester = user->getActivityIngester().get();
         if (ingester) {
@@ -1678,6 +1785,8 @@ class User {
   std::unordered_map<int, std::unique_ptr<CTFTileGenerator>> ctf_tile_generators;
 
   std::unordered_map<int, std::unique_ptr<LocalLegendTileGenerator>> local_legend_tile_generators;
+
+  std::unordered_map<int, std::unique_ptr<PieChartTileGenerator>> pie_chart_tile_generators;
 
   std::unique_ptr<TraversalTileGenerator> traversal_tile_generator;
 
