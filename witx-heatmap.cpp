@@ -253,7 +253,6 @@ struct SquadratTile {
   mutable double last_visit_time{};
   mutable std::string last_athlete_id{};
   mutable std::unordered_map<std::string, typename std::unordered_set<std::string>> visited_activity_ids{};
-  mutable std::unordered_map<std::string, double> last_visit_time_by_athlete{};
 
   bool operator<(const SquadratTile& other) const {
     return std::tie(squadrat_q, squadrat_r) < std::tie(other.squadrat_q, other.squadrat_r);
@@ -278,10 +277,6 @@ struct SquadratTile {
     if (time > last_visit_time) {
       last_visit_time = time;
       last_athlete_id = athlete_id;
-    }
-    auto& athlete_last_time = last_visit_time_by_athlete[athlete_id];
-    if (time > athlete_last_time) {
-      athlete_last_time = time;
     }
     visited_activity_ids[athlete_id].insert(activity_id);
   }
@@ -352,16 +347,6 @@ struct SquadratTile {
       counts[athlete_id] = static_cast<int>(activities.size());
     }
     return counts;
-  }
-
-  // Per-athlete freshness (1 = visited today, 0 = last visited AGE_THRESHOLD+ days ago), sorted by athlete_id
-  std::map<std::string, double> getFreshnessByAthlete() const {
-    std::map<std::string, double> freshness;
-    for (const auto& [athlete_id, athlete_last_time] : last_visit_time_by_athlete) {
-      double age_days = std::max(0.0, millisecondsNow() - athlete_last_time) / MILLISECONDS_PER_DAY;
-      freshness[athlete_id] = 1.0 - std::min(1.0, age_days / AGE_THRESHOLD);
-    }
-    return freshness;
   }
 
   // Get the 6 corners of the hexagon in lat/lon degrees
@@ -912,54 +897,6 @@ class Tile {
     }
   }
 
-  // Nested-hexagon chart: the most recent visitor always fills the full hex, and every other athlete's
-  // hex is scaled relative to that most-recent freshness, drawn largest (most recent) first so
-  // staler athletes stay visible nested on top.
-  void paintRecency(const std::set<SquadratTile>& squadrat_tiles) {
-    for (const auto& tile : squadrat_tiles) {
-      auto freshness = tile.getFreshnessByAthlete();
-      if (freshness.empty()) {
-        continue;
-      }
-
-      std::vector<std::pair<std::string, double>> sorted_freshness(freshness.begin(), freshness.end());
-      std::sort(sorted_freshness.begin(), sorted_freshness.end(), [](const auto& a, const auto& b) {
-        return a.second > b.second;
-      });
-      double max_freshness = sorted_freshness.front().second;
-      if (max_freshness <= 0.0) {
-        continue;  // every athlete's last visit here is older than AGE_THRESHOLD days
-      }
-
-      auto polygon = hexToPixelPolygon(tile.getVertices());
-      cv::Point2d center(0.0, 0.0);
-      for (const auto& p : polygon) {
-        center += cv::Point2d(p.x, p.y);
-      }
-      center *= 1.0 / static_cast<double>(polygon.size());
-
-      for (const auto& [athlete_id, athlete_freshness] : sorted_freshness) {
-        if (athlete_freshness <= 0.0) {
-          break;  // remaining entries are staler still (sorted descending)
-        }
-        double scale = athlete_freshness / max_freshness;
-        std::vector<cv::Point> scaled_polygon;
-        scaled_polygon.reserve(polygon.size());
-        for (const auto& p : polygon) {
-          cv::Point2d scaled = center + (cv::Point2d(p.x, p.y) - center) * scale;
-          scaled_polygon.emplace_back(cvRound(scaled.x), cvRound(scaled.y));
-        }
-        cv::fillConvexPoly(image_data_, scaled_polygon, colorForAthlete(athlete_id), cv::LINE_AA);
-      }
-
-      if (z_ >= 11) {
-        cv::Point label_pos(cvRound(center.x) - 10, cvRound(center.y) + 5);
-        cv::putText(image_data_, std::to_string(static_cast<int>(tile.getLastVisitAge())) + "d", label_pos,
-                    cv::FONT_HERSHEY_SIMPLEX, 0.4, cv::Scalar(0, 0, 0, 255), 1, cv::LINE_AA);
-      }
-    }
-  }
-
   void paint(const AlphaShape& alpha_shape) {
     // paintRoute(alpha_shape.getMatchedRoutes());
     // Fill each alpha-valid triangle without anti-aliasing so adjacent triangles don't leave
@@ -1394,15 +1331,6 @@ class PieChartTileGenerator : public SquadratTileGenerator {
   }
 };
 
-class RecencyTileGenerator : public SquadratTileGenerator {
-  using SquadratTileGenerator::SquadratTileGenerator;
-
- protected:
-  void paintTile(Tile& tile) const override {
-    tile.paintRecency(squadrat_tiles_);
-  }
-};
-
 class TraversalTileGenerator : public TileGenerator {
  public:
   TraversalTileGenerator(const std::vector<MatchedRoute>& matched_routes) {
@@ -1780,13 +1708,6 @@ class User {
     });
 
     if (!meta_users.empty()) {
-      recency_tile_generator = std::make_unique<RecencyTileGenerator>(matched_routes, static_cast<double>(1000));
-      tile_generators_.push_back(recency_tile_generator.get());
-
-      registerTileRoute(svr, url_path + R"(/recency/(\d+)/(\d+)/(\d+).png)", [this](const httplib::Request&) {
-        return recency_tile_generator.get();
-      });
-
       {
         TimerLog ctf_tiles_timer("Generating ctfs for radius 1000");
         auto it = ctf_tile_generators.emplace(
@@ -1865,8 +1786,6 @@ class User {
   std::unique_ptr<TraversalTileGenerator> traversal_tile_generator;
 
   std::unique_ptr<SquadratTileGenerator> inverse_squadrat_generator;
-
-  std::unique_ptr<RecencyTileGenerator> recency_tile_generator;
 
   std::unique_ptr<StravaHeatmapTileGenerator> heatmap_tile_generator;
 
