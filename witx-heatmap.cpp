@@ -825,78 +825,72 @@ class Tile {
         -5);
   }
 
-  // Fill each hex with a pie chart of per-athlete visit share, clipped to the hex outline
+  // Nested-hexagon chart: each athlete's visible ring area (outer hex minus the next-smaller hex
+  // drawn on top of it) is proportional to their share of total visits, not just the outer radius.
   void paintPieChart(const std::set<SquadratTile>& squadrat_tiles) {
-    cv::Rect img_rect(0, 0, image_data_.cols, image_data_.rows);
     for (const auto& tile : squadrat_tiles) {
       auto counts = tile.getVisitCountsByAthlete();
+      if (counts.empty()) {
+        continue;
+      }
+
+      std::vector<std::pair<std::string, int>> sorted_counts(counts.begin(), counts.end());
+      std::sort(sorted_counts.begin(), sorted_counts.end(), [](const auto& a, const auto& b) {
+        return a.second > b.second;
+      });
       int total = 0;
-      for (const auto& [athlete_id, count] : counts) {
+      for (const auto& [athlete_id, count] : sorted_counts) {
         total += count;
       }
-      if (total == 0) {
-        continue;
+
+      // suffix_sum[i] = share of this athlete plus everyone drawn on top of them, so the hex drawn
+      // for athlete i has area suffix_sum[i]/total of the full hex, leaving a ring of exactly their share.
+      std::vector<int> suffix_sum(sorted_counts.size());
+      int running = 0;
+      for (int i = static_cast<int>(sorted_counts.size()) - 1; i >= 0; --i) {
+        running += sorted_counts[i].second;
+        suffix_sum[i] = running;
       }
 
       auto polygon = hexToPixelPolygon(tile.getVertices());
-      cv::Rect bounds = cv::boundingRect(polygon);
-      cv::Rect visible = bounds & img_rect;
-      if (visible.width <= 0 || visible.height <= 0) {
-        continue;
-      }
-
-      cv::Point center(0, 0);
+      cv::Point2d center(0.0, 0.0);
       for (const auto& p : polygon) {
-        center += p;
+        center += cv::Point2d(p.x, p.y);
       }
-      center.x /= static_cast<int>(polygon.size());
-      center.y /= static_cast<int>(polygon.size());
+      center *= 1.0 / static_cast<double>(polygon.size());
 
-      double radius = 0.0;
-      for (const auto& p : polygon) {
-        radius = std::max(radius, cv::norm(p - center));
+      double circumradius = cv::norm(cv::Point2d(polygon[0].x, polygon[0].y) - center);
+      std::vector<double> scales(sorted_counts.size());
+      for (std::size_t i = 0; i < sorted_counts.size(); ++i) {
+        scales[i] = std::sqrt(static_cast<double>(suffix_sum[i]) / total);
+        std::vector<cv::Point> scaled_polygon;
+        scaled_polygon.reserve(polygon.size());
+        for (const auto& p : polygon) {
+          cv::Point2d scaled = center + (cv::Point2d(p.x, p.y) - center) * scales[i];
+          scaled_polygon.emplace_back(cvRound(scaled.x), cvRound(scaled.y));
+        }
+        cv::fillConvexPoly(image_data_, scaled_polygon, colorForAthlete(sorted_counts[i].first), cv::LINE_AA);
       }
-
-      std::vector<cv::Point> local_polygon;
-      local_polygon.reserve(polygon.size());
-      for (const auto& p : polygon) {
-        local_polygon.push_back(p - bounds.tl());
-      }
-      cv::Point local_center = center - bounds.tl();
-
-      cv::Mat mask(bounds.height, bounds.width, CV_8UC1, cv::Scalar(0));
-      cv::fillConvexPoly(mask, local_polygon, cv::Scalar(255), cv::LINE_AA);
-
-      cv::Mat wedge_layer(bounds.height, bounds.width, CV_8UC4, cv::Scalar(0, 0, 0, 0));
-      double start_angle = -90.0;  // slices start at the top and sweep clockwise
-      std::vector<std::pair<std::string, std::pair<double, double>>> slice_angles;
-      for (const auto& [athlete_id, count] : counts) {
-        double sweep = 360.0 * count / total;
-        double end_angle = start_angle + sweep;
-        cv::ellipse(wedge_layer, local_center, cv::Size(cvRound(radius), cvRound(radius)), 0, start_angle, end_angle,
-                    colorForAthlete(athlete_id), cv::FILLED, cv::LINE_AA);
-        slice_angles.emplace_back(athlete_id, std::make_pair(start_angle, end_angle));
-        start_angle = end_angle;
-      }
-
-      cv::Rect local_visible(visible.x - bounds.x, visible.y - bounds.y, visible.width, visible.height);
-      wedge_layer(local_visible).copyTo(image_data_(visible), mask(local_visible));
 
       if (z_ >= 11) {
-        cv::putText(image_data_, std::to_string(total), center + cv::Point(-6, 5), cv::FONT_HERSHEY_SIMPLEX, 0.4,
+        cv::Point label_pos(cvRound(center.x) - 5, cvRound(center.y) + 5);
+        cv::putText(image_data_, std::to_string(total), label_pos, cv::FONT_HERSHEY_SIMPLEX, 0.4,
                     cv::Scalar(0, 0, 0, 255), 1, cv::LINE_AA);
-        for (const auto& [athlete_id, angles] : slice_angles) {
-          double fraction = (angles.second - angles.first) / 360.0;
+
+        // Spread each athlete's percentage label around the hex, radially centered in their own ring.
+        for (std::size_t i = 0; i < sorted_counts.size(); ++i) {
+          double fraction = static_cast<double>(sorted_counts[i].second) / total;
           if (fraction <= 0.10) {
             continue;
           }
-          double mid_angle_rad = (angles.first + angles.second) / 2.0 * M_PI / 180.0;
-          double label_radius = radius * 0.6;
-          cv::Point label_pos = center + cv::Point(static_cast<int>(label_radius * std::cos(mid_angle_rad)),
-                                                   static_cast<int>(label_radius * std::sin(mid_angle_rad)));
+          double inner_scale = (i + 1 < scales.size()) ? scales[i + 1] : 0.0;
+          double label_radius = (scales[i] + inner_scale) / 2.0 * circumradius;
+          double angle_rad = (-90.0 + i * 360.0 / sorted_counts.size()) * M_PI / 180.0;
+          cv::Point label_pos_pct = cv::Point(cvRound(center.x + label_radius * std::cos(angle_rad)),
+                                              cvRound(center.y + label_radius * std::sin(angle_rad)));
           std::string pct_text = std::to_string(static_cast<int>(std::round(fraction * 100))) + "%";
-          cv::putText(image_data_, pct_text, label_pos, cv::FONT_HERSHEY_SIMPLEX, 0.35, cv::Scalar(255, 255, 255, 255),
-                      1, cv::LINE_AA);
+          cv::putText(image_data_, pct_text, label_pos_pct, cv::FONT_HERSHEY_SIMPLEX, 0.3, cv::Scalar(0, 0, 0, 255), 1,
+                      cv::LINE_AA);
         }
       }
     }
