@@ -825,8 +825,8 @@ class Tile {
         -5);
   }
 
-  // Nested-hexagon chart: each athlete's visible ring area (outer hex minus the next-smaller hex
-  // drawn on top of it) is proportional to their share of total visits, not just the outer radius.
+  // Nested-hexagon chart: each athlete's visible ring radius (outer hex minus the next-smaller hex
+  // drawn on top of it) is proportional to their share of total visits.
   void paintPieChart(const std::set<SquadratTile>& squadrat_tiles) {
     for (const auto& tile : squadrat_tiles) {
       auto counts = tile.getVisitCountsByAthlete();
@@ -844,7 +844,7 @@ class Tile {
       }
 
       // suffix_sum[i] = share of this athlete plus everyone drawn on top of them, so the hex drawn
-      // for athlete i has area suffix_sum[i]/total of the full hex, leaving a ring of exactly their share.
+      // for athlete i has radius suffix_sum[i]/total of the full hex, leaving a ring width of exactly their share.
       std::vector<int> suffix_sum(sorted_counts.size());
       int running = 0;
       for (int i = static_cast<int>(sorted_counts.size()) - 1; i >= 0; --i) {
@@ -862,7 +862,7 @@ class Tile {
       double circumradius = cv::norm(cv::Point2d(polygon[0].x, polygon[0].y) - center);
       std::vector<double> scales(sorted_counts.size());
       for (std::size_t i = 0; i < sorted_counts.size(); ++i) {
-        scales[i] = std::sqrt(static_cast<double>(suffix_sum[i]) / total);
+        scales[i] = static_cast<double>(suffix_sum[i]) / total;
         std::vector<cv::Point> scaled_polygon;
         scaled_polygon.reserve(polygon.size());
         for (const auto& p : polygon) {
