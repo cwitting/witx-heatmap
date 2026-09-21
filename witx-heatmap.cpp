@@ -876,21 +876,22 @@ class Tile {
         cv::Point label_pos(cvRound(center.x) - 5, cvRound(center.y) + 5);
         cv::putText(image_data_, std::to_string(total), label_pos, cv::FONT_HERSHEY_SIMPLEX, 0.4,
                     cv::Scalar(0, 0, 0, 255), 1, cv::LINE_AA);
-
-        // Spread each athlete's percentage label around the hex, radially centered in their own ring.
-        for (std::size_t i = 0; i < sorted_counts.size(); ++i) {
-          double fraction = static_cast<double>(sorted_counts[i].second) / total;
-          if (fraction <= 0.10) {
-            continue;
+        if (z_ >= 13) {
+          // Spread each athlete's percentage label around the hex, radially centered in their own ring.
+          for (std::size_t i = 0; i < sorted_counts.size(); ++i) {
+            double fraction = static_cast<double>(sorted_counts[i].second) / total;
+            if (fraction <= 0.10) {
+              continue;
+            }
+            double inner_scale = (i + 1 < scales.size()) ? scales[i + 1] : 0.0;
+            double label_radius = (scales[i] + inner_scale) / 2.0 * circumradius;
+            double angle_rad = (-90.0 + i * 360.0 / sorted_counts.size()) * M_PI / 180.0;
+            cv::Point label_pos_pct = cv::Point(cvRound(center.x + label_radius * std::cos(angle_rad)),
+                                                cvRound(center.y + label_radius * std::sin(angle_rad)));
+            std::string pct_text = std::to_string(static_cast<int>(std::round(fraction * 100))) + "%";
+            cv::putText(image_data_, pct_text, label_pos_pct, cv::FONT_HERSHEY_SIMPLEX, 0.3, cv::Scalar(0, 0, 0, 255),
+                        1, cv::LINE_AA);
           }
-          double inner_scale = (i + 1 < scales.size()) ? scales[i + 1] : 0.0;
-          double label_radius = (scales[i] + inner_scale) / 2.0 * circumradius;
-          double angle_rad = (-90.0 + i * 360.0 / sorted_counts.size()) * M_PI / 180.0;
-          cv::Point label_pos_pct = cv::Point(cvRound(center.x + label_radius * std::cos(angle_rad)),
-                                              cvRound(center.y + label_radius * std::sin(angle_rad)));
-          std::string pct_text = std::to_string(static_cast<int>(std::round(fraction * 100))) + "%";
-          cv::putText(image_data_, pct_text, label_pos_pct, cv::FONT_HERSHEY_SIMPLEX, 0.3, cv::Scalar(0, 0, 0, 255), 1,
-                      cv::LINE_AA);
         }
       }
     }
