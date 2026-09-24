@@ -43,6 +43,17 @@ const std::set<std::string> activity_id_blacklist = {
 #define NIKOLAJ_ID "38458035"
 #define THOMAS_ID "79701175"
 
+static std::string athleteId2String(const std::string& athlete_id) {
+  if (athlete_id == CHRISTIAN_ID) {
+    return "C";
+  } else if (athlete_id == NIKOLAJ_ID) {
+    return "N";
+  } else if (athlete_id == THOMAS_ID) {
+    return "T";
+  }
+  return "U";
+}
+
 static std::string getDataDir() {
   char* data_dir = std::getenv("DATA_DIR");
   return data_dir ? data_dir : DEFAULT_DATA_DIR;
@@ -330,6 +341,16 @@ struct SquadratTile {
     return colorForAthlete(most_visited_athlete);
   }
 
+  cv::Scalar getUniqueColor() const {
+    std::size_t total_visits = getTotalVisitCount();
+    cv::Scalar result(0, 0, 0, 130);
+    if (visited_activity_ids.size() == 1) {
+      return colorForAthlete(visited_activity_ids.begin()->first);
+    }
+    // Return gray
+    return cv::Scalar(128, 128, 128, 130);
+  }
+
   int getMostVisitedCount() const {
     size_t max_visits = 0;
     for (const auto& [athlete_id, activities] : visited_activity_ids) {
@@ -347,6 +368,14 @@ struct SquadratTile {
       counts[athlete_id] = static_cast<int>(activities.size());
     }
     return counts;
+  }
+
+  int getTotalVisitCount() const {
+    int total = 0;
+    for (const auto& [athlete_id, activities] : visited_activity_ids) {
+      total += static_cast<int>(activities.size());
+    }
+    return total;
   }
 
   // Get the 6 corners of the hexagon in lat/lon degrees
@@ -825,6 +854,18 @@ class Tile {
         -5);
   }
 
+  void paintUnique(const std::set<SquadratTile>& squadrat_tiles) {
+    paintSquadratTiles(
+        squadrat_tiles,
+        [](const SquadratTile& tile) {
+          return tile.getUniqueColor();
+        },
+        [](const SquadratTile& tile) {
+          return std::to_string((int)tile.getMostVisitedCount());
+        },
+        -5);
+  }
+
   // Nested-hexagon chart: each athlete's visible ring radius (outer hex minus the next-smaller hex
   // drawn on top of it) is proportional to their share of total visits.
   void paintPieChart(const std::set<SquadratTile>& squadrat_tiles) {
@@ -951,11 +992,11 @@ class Tile {
       for (const auto& p : polygon) {
         center += p;
       }
+      std::string text = label_fn(tile);
       center.x = center.x / static_cast<int>(polygon.size()) + label_x_offset;  // Center + shift text to be centered
       center.y = center.y / static_cast<int>(polygon.size()) + 5;
       if (z_ >= 11) {
-        cv::putText(image_data_, label_fn(tile), center, cv::FONT_HERSHEY_SIMPLEX, 0.4, cv::Scalar(0, 0, 0, 255), 1,
-                    cv::LINE_AA);
+        cv::putText(image_data_, text, center, cv::FONT_HERSHEY_SIMPLEX, 0.4, cv::Scalar(0, 0, 0, 255), 1, cv::LINE_AA);
       }
     }
   }
@@ -1319,6 +1360,15 @@ class LocalLegendTileGenerator : public SquadratTileGenerator {
  protected:
   void paintTile(Tile& tile) const override {
     tile.paintLocalLegend(squadrat_tiles_);
+  }
+};
+
+class UniqueTileGenerator : public SquadratTileGenerator {
+  using SquadratTileGenerator::SquadratTileGenerator;
+
+ protected:
+  void paintTile(Tile& tile) const override {
+    tile.paintUnique(squadrat_tiles_);
   }
 };
 
@@ -1733,6 +1783,18 @@ class User {
       });
 
       {
+        TimerLog unique_tiles_timer("Generating uniques for radius 1000");
+        auto it = unique_tile_generators.emplace(
+            1000, std::make_unique<UniqueTileGenerator>(matched_routes, static_cast<double>(1000)));
+        tile_generators_.push_back(unique_tile_generators.find(1000)->second.get());
+      }
+
+      registerTileRoute(svr, url_path + R"(/unique/(\d+)/(\d+)/(\d+).png)", [this](const httplib::Request& req) {
+        int radius = req.has_param("radius") ? std::stoi(req.get_param_value("radius")) : 0;
+        return getByRadius(unique_tile_generators, radius);
+      });
+
+      {
         TimerLog pie_chart_tiles_timer("Generating pie_charts for radius 1000");
         auto it = pie_chart_tile_generators.emplace(
             1000, std::make_unique<PieChartTileGenerator>(matched_routes, static_cast<double>(1000)));
@@ -1780,6 +1842,8 @@ class User {
   std::unordered_map<int, std::unique_ptr<CTFTileGenerator>> ctf_tile_generators;
 
   std::unordered_map<int, std::unique_ptr<LocalLegendTileGenerator>> local_legend_tile_generators;
+
+  std::unordered_map<int, std::unique_ptr<UniqueTileGenerator>> unique_tile_generators;
 
   std::unordered_map<int, std::unique_ptr<PieChartTileGenerator>> pie_chart_tile_generators;
 
