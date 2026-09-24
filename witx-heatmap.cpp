@@ -1680,6 +1680,8 @@ class User {
   }
 
   void create(httplib::Server& svr) {
+    std::string url_path = getUrlPath();
+
     {
       TimerLog alpha_shapes_timer("Generating alpha shapes for radius 4000");
       auto it = alpha_shapes.emplace(
@@ -1700,7 +1702,6 @@ class User {
     }
 
     // Main route planning endpoint
-    std::string url_path = getUrlPath();
     registerTileRoute(svr, url_path + R"(/coverage/(\d+)/(\d+)/(\d+).png)", [this](const httplib::Request& req) {
       int radius = req.has_param("radius") ? std::stoi(req.get_param_value("radius")) : 0;
       return getByRadius(alpha_shapes, radius);
