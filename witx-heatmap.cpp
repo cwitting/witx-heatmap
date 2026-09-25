@@ -37,6 +37,11 @@ const std::set<std::string> activity_id_blacklist = {
     "5055464955",
 };
 
+#define RAW_TILE_SIZE 256
+#define TILE_SIZE_BUFFER 20
+#define TILE_SIZE (RAW_TILE_SIZE + 2 * TILE_SIZE_BUFFER)
+constexpr double TILE_SIZE_EXTRA_RATIO = (static_cast<double>(TILE_SIZE) / RAW_TILE_SIZE - 1.0) / 2.0;
+
 #define DEFAULT_DATA_DIR "/media/christian/Data/Backup/strava/heatmap_data"
 
 #define CHRISTIAN_ID "16938953"
@@ -684,13 +689,23 @@ class AlphaShape {
 
 class Tile {
  public:
-  Tile(int z, int x, int y) : image_data_(256, 256, CV_8UC4, cv::Scalar(0, 0, 0, 0)), z_(z), x_(x), y_(y) {
-    min_lon_ = x_ / std::pow(2.0, z_) * 360.0 - 180.0;
-    max_lon_ = (x_ + 1) / std::pow(2.0, z_) * 360.0 - 180.0;
-    min_lat_ = std::atan(std::sinh(M_PI * (1 - 2 * (y_ + 1) / std::pow(2.0, z_)))) * 180.0 / M_PI;
-    max_lat_ = std::atan(std::sinh(M_PI * (1 - 2 * y_ / std::pow(2.0, z_)))) * 180.0 / M_PI;
+  Tile(int z, int x, int y) : image_data_(TILE_SIZE, TILE_SIZE, CV_8UC4, cv::Scalar(0, 0, 0, 0)), z_(z), x_(x), y_(y) {
+    min_lon_ = (x_ - TILE_SIZE_EXTRA_RATIO) / std::pow(2.0, z_) * 360.0 - 180.0;
+    max_lon_ = (x_ + 1 + TILE_SIZE_EXTRA_RATIO) / std::pow(2.0, z_) * 360.0 - 180.0;
+    min_lat_ =
+        std::atan(std::sinh(M_PI * (1 - 2 * (y_ + 1 + TILE_SIZE_EXTRA_RATIO) / std::pow(2.0, z_)))) * 180.0 / M_PI;
+    max_lat_ = std::atan(std::sinh(M_PI * (1 - 2 * (y_ - TILE_SIZE_EXTRA_RATIO) / std::pow(2.0, z_)))) * 180.0 / M_PI;
     // fprintf(stderr, "Tile z=%d, x=%d, y=%d: min_lat=%.6f, max_lat=%.6f, min_lon=%.6f, max_lon=%.6f\n", z_, x_, y_,
     //         min_lat_, max_lat_, min_lon_, max_lon_);
+  }
+
+  void trimBuffer() {
+    // Trim the extra buffer around the tile if necessary
+    if (TILE_SIZE_BUFFER > 0 && image_data_.cols > RAW_TILE_SIZE && image_data_.rows > RAW_TILE_SIZE) {
+      // Assuming image_data_ is a cv::Mat, crop the buffer
+      cv::Rect roi(TILE_SIZE_BUFFER, TILE_SIZE_BUFFER, RAW_TILE_SIZE, RAW_TILE_SIZE);
+      image_data_ = image_data_(roi);
+    }
   }
 
   void paintMatches(const std::vector<WaySegment>& way_segments) {
@@ -727,8 +742,8 @@ class Tile {
 
     // Accumulate per-route coverage in a float buffer so pixels crossed by many different
     // activities build up brightness, then colorize with the orange-to-white-hot gradient.
-    cv::Mat accumulator(256, 256, CV_32FC1, cv::Scalar(0));
-    cv::Mat route_mask(256, 256, CV_8UC1);
+    cv::Mat accumulator(TILE_SIZE, TILE_SIZE, CV_32FC1, cv::Scalar(0));
+    cv::Mat route_mask(TILE_SIZE, TILE_SIZE, CV_8UC1);
 
     for (const auto& matched_route : matched_routes) {
       const auto& route = matched_route.route.route;
@@ -743,8 +758,9 @@ class Tile {
         cv::Point p1_px = toPixel(p1);
         cv::Point p2_px = toPixel(p2);
         // Skip segments that clearly miss this tile; cv::line clips the rest for us.
-        if ((p1_px.x < -8 && p2_px.x < -8) || (p1_px.x > 264 && p2_px.x > 264) || (p1_px.y < -8 && p2_px.y < -8) ||
-            (p1_px.y > 264 && p2_px.y > 264)) {
+        constexpr int extra = 8;
+        if ((p1_px.x < -extra && p2_px.x < -extra) || (p1_px.x > TILE_SIZE + extra && p2_px.x > TILE_SIZE + extra) ||
+            (p1_px.y < -extra && p2_px.y < -extra) || (p1_px.y > TILE_SIZE + extra && p2_px.y > TILE_SIZE + extra)) {
           continue;
         }
         cv::line(route_mask, p1_px, p2_px, cv::Scalar(255), 1, cv::LINE_AA);
@@ -1001,14 +1017,14 @@ class Tile {
     }
   }
 
-  // Project a lat/lon coordinate to pixel coordinates within this tile's 256x256 image
+  // Project a lat/lon coordinate to pixel coordinates within this tile's TILE_SIZE x TILE_SIZE image
   cv::Point toPixel(const Coordinate& c) const {
-    int x = static_cast<int>((c.lon - min_lon_) / (max_lon_ - min_lon_) * 256);
-    int y = static_cast<int>((max_lat_ - c.lat) / (max_lat_ - min_lat_) * 256);
+    int x = static_cast<int>((c.lon - min_lon_) / (max_lon_ - min_lon_) * TILE_SIZE);
+    int y = static_cast<int>((max_lat_ - c.lat) / (max_lat_ - min_lat_) * TILE_SIZE);
     return cv::Point(x, y);
   }
 
-  // Project hexagon corners (lat/lon) to pixel coordinates within this tile's 256x256 image
+  // Project hexagon corners (lat/lon) to pixel coordinates within this tile's TILE_SIZE x TILE_SIZE image
   std::vector<cv::Point> hexToPixelPolygon(const std::vector<Coordinate>& vertices) const {
     std::vector<cv::Point> polygon;
     polygon.reserve(vertices.size());
@@ -1285,6 +1301,7 @@ class TileGenerator {
       paintTile(tile);
     }
     afterPaint(tile);
+    tile.trimBuffer();
     return tile;
   }
 
