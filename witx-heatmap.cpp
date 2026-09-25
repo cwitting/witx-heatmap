@@ -842,8 +842,7 @@ class Tile {
         },
         [inverse](const SquadratTile& tile) {
           return std::to_string(inverse ? (int)tile.getFirstVisitAge() : (int)tile.getLastVisitAge()) + "d";
-        },
-        -20);
+        });
   }
 
   void paintCTF(const std::set<SquadratTile>& squadrat_tiles) {
@@ -854,8 +853,7 @@ class Tile {
         },
         [](const SquadratTile& tile) {
           return std::to_string((int)tile.getLastVisitAge()) + "d";
-        },
-        -20);
+        });
   }
 
   void paintLocalLegend(const std::set<SquadratTile>& squadrat_tiles) {
@@ -866,8 +864,7 @@ class Tile {
         },
         [](const SquadratTile& tile) {
           return std::to_string((int)tile.getMostVisitedCount());
-        },
-        -10);
+        });
   }
 
   void paintUnique(const std::set<SquadratTile>& squadrat_tiles) {
@@ -878,8 +875,7 @@ class Tile {
         },
         [](const SquadratTile& tile) {
           return std::to_string((int)tile.getMostVisitedCount());
-        },
-        -10);
+        });
   }
 
   // Nested-hexagon chart: each athlete's visible ring radius (outer hex minus the next-smaller hex
@@ -930,9 +926,7 @@ class Tile {
       }
 
       if (z_ >= 11) {
-        cv::Point label_pos(cvRound(center.x) - 5, cvRound(center.y) + 10);
-        cv::putText(image_data_, std::to_string(total), label_pos, cv::FONT_HERSHEY_SIMPLEX, 0.8,
-                    cv::Scalar(0, 0, 0, 255), 2, cv::LINE_AA);
+        paintCenterText(std::to_string(total), center);
         if (z_ >= 13) {
           // Spread each athlete's percentage label around the hex, radially centered in their own ring.
           for (std::size_t i = 0; i < sorted_counts.size(); ++i) {
@@ -946,8 +940,7 @@ class Tile {
             cv::Point label_pos_pct = cv::Point(cvRound(center.x + label_radius * std::cos(angle_rad)),
                                                 cvRound(center.y + label_radius * std::sin(angle_rad)));
             std::string pct_text = std::to_string(static_cast<int>(std::round(fraction * 100))) + "%";
-            cv::putText(image_data_, pct_text, label_pos_pct, cv::FONT_HERSHEY_SIMPLEX, 0.6, cv::Scalar(0, 0, 0, 255),
-                        2, cv::LINE_AA);
+            paintCenterText(pct_text, label_pos_pct, 0.6);
           }
         }
       }
@@ -996,10 +989,18 @@ class Tile {
   }
 
  private:
+  void paintCenterText(const std::string& text, const cv::Point& center, double font_scale = 0.8) {
+    constexpr int thickness = 2;
+    constexpr int font_face = cv::FONT_HERSHEY_SIMPLEX;
+    cv::Size textsize = cv::getTextSize(text, font_face, font_scale, thickness, nullptr);
+    cv::Point text_org(center.x - textsize.width / 2, center.y + textsize.height / 2);
+    cv::putText(image_data_, text, text_org, font_face, font_scale, cv::Scalar(0, 0, 0, 255), thickness, cv::LINE_AA);
+  }
+
   // Fill each tile's hexagon and optionally label its centroid; used for the paint/paintCTF/paintLocalLegend variants
   void paintSquadratTiles(const std::set<SquadratTile>& squadrat_tiles,
                           const std::function<cv::Scalar(const SquadratTile&)>& color_fn,
-                          const std::function<std::string(const SquadratTile&)>& label_fn, int label_x_offset) {
+                          const std::function<std::string(const SquadratTile&)>& label_fn) {
     for (const auto& tile : squadrat_tiles) {
       auto polygon = hexToPixelPolygon(tile.getVertices());
       cv::fillConvexPoly(image_data_, polygon, color_fn(tile), cv::LINE_AA);
@@ -1009,10 +1010,10 @@ class Tile {
         center += p;
       }
       std::string text = label_fn(tile);
-      center.x = center.x / static_cast<int>(polygon.size()) + label_x_offset;  // Center + shift text to be centered
-      center.y = center.y / static_cast<int>(polygon.size()) + 5;
+      center.x = center.x / static_cast<int>(polygon.size());
+      center.y = center.y / static_cast<int>(polygon.size());
       if (z_ >= 11) {
-        cv::putText(image_data_, text, center, cv::FONT_HERSHEY_SIMPLEX, 0.8, cv::Scalar(0, 0, 0, 255), 2, cv::LINE_AA);
+        paintCenterText(text, center);
       }
     }
   }
