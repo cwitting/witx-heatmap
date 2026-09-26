@@ -133,6 +133,35 @@ cv::Scalar color_map(double value, std::vector<cv::Scalar> colors) {
   return lower_color * (1.0 - t) + upper_color * t;
 }
 
+static double haversineDistance(const Coordinate& coord1, const Coordinate& coord2) {
+  constexpr double EARTH_RADIUS_KM = 6371.0;
+  double lat1_rad = coord1.lat * M_PI / 180.0;
+  double lon1_rad = coord1.lon * M_PI / 180.0;
+  double lat2_rad = coord2.lat * M_PI / 180.0;
+  double lon2_rad = coord2.lon * M_PI / 180.0;
+
+  double dlat = lat2_rad - lat1_rad;
+  double dlon = lon2_rad - lon1_rad;
+
+  double a = std::sin(dlat / 2) * std::sin(dlat / 2) +
+             std::cos(lat1_rad) * std::cos(lat2_rad) * std::sin(dlon / 2) * std::sin(dlon / 2);
+  double c = 2 * std::atan2(std::sqrt(a), std::sqrt(1 - a));
+
+  return EARTH_RADIUS_KM * c;
+}
+
+static std::pair<double, double> yearStartEndMilliseconds(int year_start, int year_end) {
+  std::tm tm_start{0, 0, 0, 1, 0, year_start - 1900};
+  std::tm tm_end{59, 59, 23, 31, 11, year_end - 1900};
+  auto time_since_epoch_start = std::chrono::system_clock::from_time_t(std::mktime(&tm_start)).time_since_epoch();
+  auto time_since_epoch_end = std::chrono::system_clock::from_time_t(std::mktime(&tm_end)).time_since_epoch();
+  double year_start_ms =
+      static_cast<double>(std::chrono::duration_cast<std::chrono::milliseconds>(time_since_epoch_start).count());
+  double year_end_ms =
+      static_cast<double>(std::chrono::duration_cast<std::chrono::milliseconds>(time_since_epoch_end).count());
+  return {year_start_ms, year_end_ms};
+}
+
 struct Route {
   std::string link;
   std::string athlete_id;
@@ -157,6 +186,14 @@ struct Route {
       }
     }
     return static_cast<double>(std::mktime(&tm)) * 1000.0;
+  }
+  double getDistance() const {
+    double distance = 0.0;
+    for (std::size_t i = 1; i < route.size(); ++i) {
+      double d = haversineDistance(route[i - 1], route[i]);
+      distance += d;
+    }
+    return distance;
   }
 };
 
@@ -506,23 +543,6 @@ static MatchedRoute matchedRouteFromProto(const witxheatmap::PMatchedRoute& prot
     matched_route.way_segments.push_back(waySegmentFromProto(proto_segment));
   }
   return matched_route;
-}
-
-static double haversineDistance(const Coordinate& coord1, const Coordinate& coord2) {
-  constexpr double EARTH_RADIUS_KM = 6371.0;
-  double lat1_rad = coord1.lat * M_PI / 180.0;
-  double lon1_rad = coord1.lon * M_PI / 180.0;
-  double lat2_rad = coord2.lat * M_PI / 180.0;
-  double lon2_rad = coord2.lon * M_PI / 180.0;
-
-  double dlat = lat2_rad - lat1_rad;
-  double dlon = lon2_rad - lon1_rad;
-
-  double a = std::sin(dlat / 2) * std::sin(dlat / 2) +
-             std::cos(lat1_rad) * std::cos(lat2_rad) * std::sin(dlon / 2) * std::sin(dlon / 2);
-  double c = 2 * std::atan2(std::sqrt(a), std::sqrt(1 - a));
-
-  return EARTH_RADIUS_KM * c;
 }
 
 class AlphaShape {
@@ -1594,6 +1614,28 @@ static GeneratorT* getByRadius(const std::unordered_map<int, std::unique_ptr<Gen
   return generators.at(radius).get();
 }
 
+struct Statspoint {
+  double timestamp{};
+  double accumulated_distance{};
+  double accumulated_unique_distance{};
+  Statspoint operator-(const Statspoint& other) const {
+    Statspoint result;
+    result.timestamp = timestamp;
+    result.accumulated_distance = accumulated_distance - other.accumulated_distance;
+    result.accumulated_unique_distance = accumulated_unique_distance - other.accumulated_unique_distance;
+    return result;
+  }
+  Statspoint operator+(const Statspoint& other) const {
+    Statspoint result;
+    result.timestamp = timestamp;
+    result.accumulated_distance = accumulated_distance + other.accumulated_distance;
+    result.accumulated_unique_distance = accumulated_unique_distance + other.accumulated_unique_distance;
+    return result;
+  }
+};
+
+NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE(Statspoint, timestamp, accumulated_distance, accumulated_unique_distance)
+
 class User {
  public:
   std::string name;
@@ -1630,6 +1672,7 @@ class User {
       }
 #endif
     }
+    calculateStatspoints();
   }
 
   // REMEMBER TO HANDLE INGESTER TOO
@@ -1641,6 +1684,51 @@ class User {
       matched_routes.insert(matched_routes.end(), user.getMatchedRoutes().begin(), user.getMatchedRoutes().end());
       meta_users.emplace_back(&user);
     }
+    calculateStatspoints();
+  }
+
+  void calculateStatspoints() {
+    statspoints.clear();
+    std::vector<MatchedRoute> sorted_routes = matched_routes;
+    // Sort by time
+    std::sort(sorted_routes.begin(), sorted_routes.end(), [](const MatchedRoute& a, const MatchedRoute& b) {
+      return a.route.getMilliseconds() < b.route.getMilliseconds();
+    });
+    double accumulated_unique_distance = 0.0;
+    std::unordered_set<uint64_t> visited_edge_ids;
+
+    Statspoint sp;
+    for (const auto& route : sorted_routes) {
+      sp.timestamp = route.route.getMilliseconds();  // Replace with actual timestamp if available
+      sp.accumulated_distance += route.route.getDistance();
+      for (const auto& way_segment : route.way_segments) {
+        auto res = visited_edge_ids.insert(way_segment.edge_id);
+        if (res.second) {
+          sp.accumulated_unique_distance += way_segment.geometry.getDistance();
+        }
+      }
+      statspoints.push_back(sp);
+    }
+  }
+
+  std::vector<Statspoint> getStatspoints(double min_timestamp = 0.0,
+                                         double max_timestamp = std::numeric_limits<double>::max()) const {
+    std::vector<Statspoint> filtered_statspoints;
+    const Statspoint* first_statspoint = nullptr;
+    for (const auto& sp : statspoints) {
+      if (sp.timestamp < min_timestamp) {
+        first_statspoint = &sp;
+        continue;
+      }
+      if (sp.timestamp <= max_timestamp) {
+        Statspoint adjusted_sp = sp;
+        if (first_statspoint) {
+          adjusted_sp = sp - *first_statspoint;
+        }
+        filtered_statspoints.push_back(adjusted_sp);
+      }
+    }
+    return filtered_statspoints;
   }
 
   std::string getHeatmapFile() const {
@@ -1699,6 +1787,19 @@ class User {
 
   void create(httplib::Server& svr) {
     std::string url_path = getUrlPath();
+
+    svr.Get(url_path + "/stats", [this](const httplib::Request& req, httplib::Response& res) {
+      int year_start = req.has_param("year_start") ? std::stoi(req.get_param_value("year_start")) : -1;
+      int year_end = req.has_param("year_end") ? std::stoi(req.get_param_value("year_end")) : year_start;
+      nlohmann::json stats;
+      if (year_start > 0) {
+        auto [year_start_ms, year_end_ms] = yearStartEndMilliseconds(year_start, year_end);
+        stats = getStatspoints(year_start_ms, year_end_ms);
+      } else {
+        stats = getStatspoints();
+      }
+      res.set_content(stats.dump(), "application/json");
+    });
 
     {
       TimerLog alpha_shapes_timer("Generating alpha shapes for radius 4000");
@@ -1854,6 +1955,8 @@ class User {
   std::list<User*> meta_users;
   std::unique_ptr<ActivityIngester> ingester_;
   std::vector<MatchedRoute> matched_routes;
+  std::vector<Statspoint> statspoints;
+
   std::unordered_map<int, std::unique_ptr<AlphaShapeTileGenerator>> alpha_shapes;
 
   std::unordered_map<int, std::unique_ptr<SquadratTileGenerator>> squadrat_tile_generators;
