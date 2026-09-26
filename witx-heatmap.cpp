@@ -1496,9 +1496,11 @@ static void persistHeatmap(const std::vector<MatchedRoute>& matched_routes, cons
   heatmap_file.close();
 }
 
+class User;
+
 class ActivityIngester {
  public:
-  ActivityIngester(const std::string& ingest_folder, const std::vector<TileGenerator*>& tile_generators);
+  ActivityIngester(const std::string& ingest_folder, User* user);
 
   ~ActivityIngester() {
     if (ingest_thread_.joinable()) {
@@ -1506,7 +1508,7 @@ class ActivityIngester {
     }
   }
 
-  void addTilegenerators(const std::vector<TileGenerator*>& tile_generators);
+  void addUser(User* user);
 
   void ingestFolder(const std::string& ingest_folder_str, bool move_activities);
 
@@ -1516,8 +1518,8 @@ class ActivityIngester {
   std::string ingest_folder_str_;
   std::thread ingest_thread_;
   double last_cleared_time_ = millisecondsNow();
-  std::mutex tile_generators_mutex_;
-  std::vector<TileGenerator*> tile_generators_;
+  std::mutex users_mutex_;
+  std::vector<User*> users_;
 };
 
 // Register a "/.../{z}/{x}/{y}.png" XYZ tile endpoint; `get_tile_generator` picks which generator serves each request.
@@ -1716,6 +1718,20 @@ class User {
     return routes;
   }
 
+  void addRoutes(const std::vector<MatchedRoute>& mrs) {
+    for (auto& tile_generator : tile_generators_) {
+      tile_generator->addRoutes(mrs);
+    }
+    matched_routes.insert(matched_routes.end(), mrs.begin(), mrs.end());
+    calculateStatspoints();
+  }
+
+  void clearCache() {
+    for (auto& tile_generator : tile_generators_) {
+      tile_generator->clearCache();
+    }
+  }
+
   void create(httplib::Server& svr) {
     std::string url_path = getUrlPath();
 
@@ -1860,11 +1876,11 @@ class User {
       for (User* user : meta_users) {
         auto ingester = user->getActivityIngester().get();
         if (ingester) {
-          ingester->addTilegenerators(tile_generators_);
+          ingester->addUser(this);
         }
       }
     } else {
-      ingester_ = std::make_unique<ActivityIngester>(getIngestFolder(), tile_generators_);
+      ingester_ = std::make_unique<ActivityIngester>(getIngestFolder(), this);
     }
   }
 
@@ -1909,13 +1925,12 @@ class User {
   std::vector<TileGenerator*> tile_generators_;
 };
 
-void ActivityIngester::addTilegenerators(const std::vector<TileGenerator*>& tile_generators) {
-  std::scoped_lock<std::mutex> full_lock(tile_generators_mutex_);
-  tile_generators_.insert(tile_generators_.end(), tile_generators.begin(), tile_generators.end());
+void ActivityIngester::addUser(User* user) {
+  std::scoped_lock<std::mutex> full_lock(users_mutex_);
+  users_.push_back(user);
 }
 
-ActivityIngester::ActivityIngester(const std::string& ingest_folder, const std::vector<TileGenerator*>& tile_generators)
-    : tile_generators_(tile_generators) {
+ActivityIngester::ActivityIngester(const std::string& ingest_folder, User* user) : users_({user}) {
   ingest_folder_str_ = ingest_folder;
 }
 
@@ -1957,9 +1972,9 @@ void ActivityIngester::ingestFolder(const std::string& ingest_folder_str, bool m
   }
   if (!routes.empty()) {
     std::vector<MatchedRoute> matches_routes = RouteMatcher::getRouteMatcher().matchAllRoutes(routes);
-    std::scoped_lock<std::mutex> full_lock(tile_generators_mutex_);
-    for (const auto& tile_generator : tile_generators_) {
-      tile_generator->addRoutes(matches_routes);
+    std::scoped_lock<std::mutex> full_lock(users_mutex_);
+    for (auto* user : users_) {
+      user->addRoutes(matches_routes);
     }
   }
 }
@@ -1973,9 +1988,9 @@ void ActivityIngester::start() {
       // Clear cache once a day
       if (millisecondsNow() - last_cleared_time_ > MILLISECONDS_PER_DAY) {
         // Clear cache logic here
-        std::scoped_lock<std::mutex> full_lock(tile_generators_mutex_);
-        for (const auto& tile_generator : tile_generators_) {
-          tile_generator->clearCache();
+        std::scoped_lock<std::mutex> full_lock(users_mutex_);
+        for (const auto& user : users_) {
+          user->clearCache();
         }
         last_cleared_time_ = millisecondsNow();
       }
