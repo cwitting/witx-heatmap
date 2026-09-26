@@ -1498,10 +1498,7 @@ static void persistHeatmap(const std::vector<MatchedRoute>& matched_routes, cons
 
 class ActivityIngester {
  public:
-  ActivityIngester(const std::string& ingest_folder, const std::vector<TileGenerator*>& tile_generators)
-      : tile_generators_(tile_generators) {
-    ingest_folder_str_ = ingest_folder;
-  }
+  ActivityIngester(const std::string& ingest_folder, const std::vector<TileGenerator*>& tile_generators);
 
   ~ActivityIngester() {
     if (ingest_thread_.joinable()) {
@@ -1509,77 +1506,11 @@ class ActivityIngester {
     }
   }
 
-  void addTilegenerators(const std::vector<TileGenerator*>& tile_generators) {
-    std::scoped_lock<std::mutex> full_lock(tile_generators_mutex_);
-    tile_generators_.insert(tile_generators_.end(), tile_generators.begin(), tile_generators.end());
-  }
+  void addTilegenerators(const std::vector<TileGenerator*>& tile_generators);
 
-  void ingestFolder(const std::string& ingest_folder_str, bool move_activities) {
-    if (!std::filesystem::exists(ingest_folder_str)) {
-      std::cerr << "Ingest folder does not exist: " << ingest_folder_str << std::endl;
-      return;
-    }
-    std::filesystem::directory_iterator ingest_dir(ingest_folder_str);
+  void ingestFolder(const std::string& ingest_folder_str, bool move_activities);
 
-    std::vector<Route> routes;
-    for (const auto& entry : ingest_dir) {
-      // Found new json file
-      if (entry.is_regular_file() && entry.path().extension() == ".json") {
-        std::cout << "Found new file: " << entry.path() << std::endl;
-        nlohmann::json activity_json = nlohmann::json::parse(std::ifstream(entry.path()));
-        Route route;
-        route.name = activity_json.value("name", "");
-        route.activity_id = activity_json.value("id_str", "");
-        route.link = "https://www.strava.com/activities/" + route.activity_id;
-        route.athlete_id = activity_json["athlete"].value("id_str", "");
-        route.date = activity_json.value("start_date", "");
-        route.date_format = 1;
-        std::string polyline = activity_json.at("map").value("polyline", "");
-        route.route = decodePolyline(polyline, 1e5);
-        std::cout << "Ingesting activity: " << route.name << " at time " << route.date << " with " << route.route.size()
-                  << " points" << std::endl;
-        routes.push_back(route);
-
-        // Move to ingested folder
-        if (move_activities) {
-          std::filesystem::path ingested_folder = ingest_folder_str + "/ingested";
-          if (!std::filesystem::exists(ingested_folder)) {
-            std::filesystem::create_directory(ingested_folder);
-          }
-          std::filesystem::rename(entry.path(), ingested_folder / entry.path().filename());
-        }
-      }
-    }
-    if (!routes.empty()) {
-      std::vector<MatchedRoute> matches_routes = RouteMatcher::getRouteMatcher().matchAllRoutes(routes);
-      std::scoped_lock<std::mutex> full_lock(tile_generators_mutex_);
-      for (const auto& tile_generator : tile_generators_) {
-        tile_generator->addRoutes(matches_routes);
-      }
-    }
-  }
-
-  void start() {
-    ingestFolder(ingest_folder_str_ + "/ingested", false);
-    ingest_thread_ = std::thread([this]() {
-      std::cout << "Ingest folder: " << ingest_folder_str_ << std::endl;
-
-      while (true) {
-        // Clear cache once a day
-        if (millisecondsNow() - last_cleared_time_ > MILLISECONDS_PER_DAY) {
-          // Clear cache logic here
-          std::scoped_lock<std::mutex> full_lock(tile_generators_mutex_);
-          for (const auto& tile_generator : tile_generators_) {
-            tile_generator->clearCache();
-          }
-          last_cleared_time_ = millisecondsNow();
-        }
-
-        ingestFolder(ingest_folder_str_, true);
-        std::this_thread::sleep_for(std::chrono::seconds(60));
-      }
-    });
-  }
+  void start();
 
  private:
   std::string ingest_folder_str_;
@@ -1977,6 +1908,83 @@ class User {
 
   std::vector<TileGenerator*> tile_generators_;
 };
+
+void ActivityIngester::addTilegenerators(const std::vector<TileGenerator*>& tile_generators) {
+  std::scoped_lock<std::mutex> full_lock(tile_generators_mutex_);
+  tile_generators_.insert(tile_generators_.end(), tile_generators.begin(), tile_generators.end());
+}
+
+ActivityIngester::ActivityIngester(const std::string& ingest_folder, const std::vector<TileGenerator*>& tile_generators)
+    : tile_generators_(tile_generators) {
+  ingest_folder_str_ = ingest_folder;
+}
+
+void ActivityIngester::ingestFolder(const std::string& ingest_folder_str, bool move_activities) {
+  if (!std::filesystem::exists(ingest_folder_str)) {
+    std::cerr << "Ingest folder does not exist: " << ingest_folder_str << std::endl;
+    return;
+  }
+  std::filesystem::directory_iterator ingest_dir(ingest_folder_str);
+
+  std::vector<Route> routes;
+  for (const auto& entry : ingest_dir) {
+    // Found new json file
+    if (entry.is_regular_file() && entry.path().extension() == ".json") {
+      std::cout << "Found new file: " << entry.path() << std::endl;
+      nlohmann::json activity_json = nlohmann::json::parse(std::ifstream(entry.path()));
+      Route route;
+      route.name = activity_json.value("name", "");
+      route.activity_id = activity_json.value("id_str", "");
+      route.link = "https://www.strava.com/activities/" + route.activity_id;
+      route.athlete_id = activity_json["athlete"].value("id_str", "");
+      route.date = activity_json.value("start_date", "");
+      route.date_format = 1;
+      std::string polyline = activity_json.at("map").value("polyline", "");
+      route.route = decodePolyline(polyline, 1e5);
+      std::cout << "Ingesting activity: " << route.name << " at time " << route.date << " with " << route.route.size()
+                << " points" << std::endl;
+      routes.push_back(route);
+
+      // Move to ingested folder
+      if (move_activities) {
+        std::filesystem::path ingested_folder = ingest_folder_str + "/ingested";
+        if (!std::filesystem::exists(ingested_folder)) {
+          std::filesystem::create_directory(ingested_folder);
+        }
+        std::filesystem::rename(entry.path(), ingested_folder / entry.path().filename());
+      }
+    }
+  }
+  if (!routes.empty()) {
+    std::vector<MatchedRoute> matches_routes = RouteMatcher::getRouteMatcher().matchAllRoutes(routes);
+    std::scoped_lock<std::mutex> full_lock(tile_generators_mutex_);
+    for (const auto& tile_generator : tile_generators_) {
+      tile_generator->addRoutes(matches_routes);
+    }
+  }
+}
+
+void ActivityIngester::start() {
+  ingestFolder(ingest_folder_str_ + "/ingested", false);
+  ingest_thread_ = std::thread([this]() {
+    std::cout << "Ingest folder: " << ingest_folder_str_ << std::endl;
+
+    while (true) {
+      // Clear cache once a day
+      if (millisecondsNow() - last_cleared_time_ > MILLISECONDS_PER_DAY) {
+        // Clear cache logic here
+        std::scoped_lock<std::mutex> full_lock(tile_generators_mutex_);
+        for (const auto& tile_generator : tile_generators_) {
+          tile_generator->clearCache();
+        }
+        last_cleared_time_ = millisecondsNow();
+      }
+
+      ingestFolder(ingest_folder_str_, true);
+      std::this_thread::sleep_for(std::chrono::seconds(60));
+    }
+  });
+}
 
 int main(int argc, char** argv) {
   int port = 9090;
