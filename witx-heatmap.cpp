@@ -1791,21 +1791,9 @@ class User {
     });
 
     {
-      TimerLog alpha_shapes_timer("Generating alpha shapes for radius 4000");
-      auto it = alpha_shapes.emplace(
-          4000, std::make_unique<AlphaShapeTileGenerator>(matched_routes, static_cast<double>(4000)));
-      tile_generators_.push_back(it.first->second.get());
-    }
-    {
       TimerLog alpha_shapes_timer("Generating alpha shapes for radius 7000");
       auto it = alpha_shapes.emplace(
           7000, std::make_unique<AlphaShapeTileGenerator>(matched_routes, static_cast<double>(7000)));
-      tile_generators_.push_back(it.first->second.get());
-    }
-    {
-      TimerLog alpha_shapes_timer("Generating alpha shapes for radius 10000");
-      auto it = alpha_shapes.emplace(
-          10000, std::make_unique<AlphaShapeTileGenerator>(matched_routes, static_cast<double>(10000)));
       tile_generators_.push_back(it.first->second.get());
     }
 
@@ -1816,27 +1804,9 @@ class User {
     });
 
     {
-      TimerLog squadrat_tiles_timer("Generating squadrats for radius 500");
-      auto it = squadrat_tile_generators.emplace(
-          500, std::make_unique<SquadratTileGenerator>(matched_routes, static_cast<double>(500)));
-      tile_generators_.push_back(it.first->second.get());
-    }
-    {
       TimerLog squadrat_tiles_timer("Generating squadrats for radius 1000");
       auto it = squadrat_tile_generators.emplace(
           1000, std::make_unique<SquadratTileGenerator>(matched_routes, static_cast<double>(1000)));
-      tile_generators_.push_back(it.first->second.get());
-    }
-    {
-      TimerLog squadrat_tiles_timer("Generating squadrats for radius 1600");
-      auto it = squadrat_tile_generators.emplace(
-          1600, std::make_unique<SquadratTileGenerator>(matched_routes, static_cast<double>(1600)));
-      tile_generators_.push_back(it.first->second.get());
-    }
-    {
-      TimerLog squadrat_tiles_timer("Generating squadrats for radius 2000");
-      auto it = squadrat_tile_generators.emplace(
-          2000, std::make_unique<SquadratTileGenerator>(matched_routes, static_cast<double>(2000)));
       tile_generators_.push_back(it.first->second.get());
     }
 
