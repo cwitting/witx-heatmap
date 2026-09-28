@@ -1817,17 +1817,34 @@ class User {
       res.set_content(stats.dump(), "application/json");
     });
 
-    {
-      TimerLog alpha_shapes_timer("Generating alpha shapes for radius 7000");
-      auto it = alpha_shapes.emplace(
-          7000, std::make_unique<AlphaShapeTileGenerator>(matched_routes, static_cast<double>(7000)));
-      tile_generators_.push_back(it.first->second.get());
-    }
+    svr.Get(url_path + "/all_routes", [this](const httplib::Request& req, httplib::Response& res) {
+      nlohmann::json all_routes_json;
+      all_routes_json["type"] = "FeatureCollection";
+      all_routes_json["features"] = nlohmann::json::array();
 
-    // Main route planning endpoint
-    registerTileRoute(svr, url_path + R"(/coverage/(\d+)/(\d+)/(\d+).png)", [this](const httplib::Request& req) {
-      int radius = req.has_param("radius") ? std::stoi(req.get_param_value("radius")) : 0;
-      return getByRadius(alpha_shapes, radius);
+      TimerLog all_routes_timer("Generating all routes as GeoJSON");
+      for (const auto& matched_route : matched_routes) {
+        const Route& route = matched_route.route;
+        nlohmann::json& feature = all_routes_json["features"].emplace_back();
+        feature["type"] = "Feature";
+        feature["geometry"] = {{"type", "LineString"}, {"coordinates", nlohmann::json::array()}};
+        nlohmann::json& coordinates = feature["geometry"]["coordinates"];
+        for (const auto& coordinate : simplifyCoordinates(route.route)) {
+          coordinates.push_back({coordinate.lon, coordinate.lat});
+        }
+
+        // Metadata
+        feature["properties"]["name"] = route.name;
+        feature["properties"]["date"] = route.date;
+        feature["properties"]["link"] = route.link;
+        feature["properties"]["type"] = route.type;
+        feature["properties"]["elapsed_time"] = route.elapsed_time;
+        feature["properties"]["activity_id"] = route.activity_id;
+        feature["properties"]["description"] = route.description;
+        feature["properties"]["distance"] = route.getDistance();
+      }
+
+      res.set_content(all_routes_json.dump(), "application/json");
     });
 
     {
