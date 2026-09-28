@@ -305,6 +305,7 @@ struct SquadratTile {
   mutable double first_visit_time{};
   mutable double last_visit_time{};
   mutable std::string last_athlete_id{};
+  mutable int flip_count{};
   mutable std::unordered_map<std::string, typename std::unordered_set<std::string>> visited_activity_ids{};
 
   bool operator<(const SquadratTile& other) const {
@@ -329,6 +330,9 @@ struct SquadratTile {
     }
     if (time > last_visit_time) {
       last_visit_time = time;
+      if (athlete_id != last_athlete_id) {
+        flip_count++;
+      }
       last_athlete_id = athlete_id;
     }
     visited_activity_ids[athlete_id].insert(activity_id);
@@ -336,6 +340,10 @@ struct SquadratTile {
 
   double getFirstVisitTime() const {
     return first_visit_time;
+  }
+
+  double getFlipCount() const {
+    return flip_count;
   }
 
   double getLastVisitTime() const {
@@ -365,6 +373,12 @@ struct SquadratTile {
   cv::Scalar getLastVisitColor() const {
     double age = std::min(1.0, getLastVisitAge() / AGE_THRESHOLD);
     return color_map(age, default_colors);
+  }
+
+  cv::Scalar getFlipCountColor() const {
+    static constexpr double FLIP_THRESHOLD = 25.0;
+    double normalized_flip_count = std::min(1.0, getFlipCount() / FLIP_THRESHOLD);
+    return color_map(normalized_flip_count, default_colors);
   }
 
   cv::Scalar getOwnerColor() const {
@@ -466,7 +480,7 @@ struct SquadratTile {
 };
 
 NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE(SquadratTile, squadrat_q, squadrat_r, tile_size, first_visit_time, last_visit_time,
-                                   last_athlete_id)
+                                   last_athlete_id, flip_count)
 
 struct MatchedRoute {
   Route route;
@@ -873,6 +887,17 @@ class Tile {
         },
         [](const SquadratTile& tile) {
           return std::to_string((int)tile.getLastVisitAge()) + "d";
+        });
+  }
+
+  void paintFlips(const std::set<SquadratTile>& squadrat_tiles) {
+    paintSquadratTiles(
+        squadrat_tiles,
+        [](const SquadratTile& tile) {
+          return tile.getFlipCountColor();
+        },
+        [](const SquadratTile& tile) {
+          return std::to_string((int)tile.getFlipCount());
         });
   }
 
@@ -1358,7 +1383,11 @@ class SquadratTileGenerator : public TileGenerator {
   }
 
   // TODO: Handle duplicate activity IDs
-  void addRoutes(const std::vector<MatchedRoute>& matched_routes) override {
+  void addRoutes(const std::vector<MatchedRoute>& mr) override {
+    std::vector<MatchedRoute> matched_routes = mr;
+    std::sort(matched_routes.begin(), matched_routes.end(), [](const MatchedRoute& a, const MatchedRoute& b) {
+      return a.route.getMilliseconds() < b.route.getMilliseconds();
+    });
     for (const auto& matched_route : matched_routes) {
       double visit_time = matched_route.route.getMilliseconds();
       for (const auto& coordinate : matched_route.route.route) {
@@ -1390,6 +1419,15 @@ class CTFTileGenerator : public SquadratTileGenerator {
  protected:
   void paintTile(Tile& tile) const override {
     tile.paintCTF(squadrat_tiles_);
+  }
+};
+
+class FlipTileGenerator : public SquadratTileGenerator {
+  using SquadratTileGenerator::SquadratTileGenerator;
+
+ protected:
+  void paintTile(Tile& tile) const override {
+    tile.paintFlips(squadrat_tiles_);
   }
 };
 
@@ -1842,6 +1880,18 @@ class User {
       });
 
       {
+        TimerLog flip_tiles_timer("Generating flips for radius 1000");
+        auto it = flip_tile_generators.emplace(
+            1000, std::make_unique<FlipTileGenerator>(matched_routes, static_cast<double>(1000)));
+        tile_generators_.push_back(flip_tile_generators.find(1000)->second.get());
+      }
+
+      registerTileRoute(svr, url_path + R"(/flips/(\d+)/(\d+)/(\d+).png)", [this](const httplib::Request& req) {
+        int radius = req.has_param("radius") ? std::stoi(req.get_param_value("radius")) : 0;
+        return getByRadius(flip_tile_generators, radius);
+      });
+
+      {
         TimerLog local_legend_tiles_timer("Generating local_legends for radius 1000");
         auto it = local_legend_tile_generators.emplace(
             1000, std::make_unique<LocalLegendTileGenerator>(matched_routes, static_cast<double>(1000)));
@@ -1913,6 +1963,8 @@ class User {
   std::unordered_map<int, std::unique_ptr<SquadratTileGenerator>> squadrat_tile_generators;
 
   std::unordered_map<int, std::unique_ptr<CTFTileGenerator>> ctf_tile_generators;
+
+  std::unordered_map<int, std::unique_ptr<FlipTileGenerator>> flip_tile_generators;
 
   std::unordered_map<int, std::unique_ptr<LocalLegendTileGenerator>> local_legend_tile_generators;
 
