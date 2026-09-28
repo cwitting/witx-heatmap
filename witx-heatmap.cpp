@@ -572,7 +572,7 @@ class AlphaShape {
         continue;
       }
       */
-      matched_routes_.push_back(matched_route);
+      matched_routes_.insert_or_assign(matched_route.route.activity_id, matched_route);
 
       auto simplified_route = simplifyCoordinates(matched_route.route.route);
 
@@ -682,7 +682,7 @@ class AlphaShape {
     }
   }
 
-  const std::vector<MatchedRoute>& getMatchedRoutes() const {
+  const std::map<std::string, MatchedRoute>& getMatchedRoutes() const {
     return matched_routes_;
   }
 
@@ -704,7 +704,7 @@ class AlphaShape {
   std::vector<std::pair<double, double>> points_;
   std::vector<std::pair<Coordinate, Coordinate>> boundary_edges_;
   std::vector<std::array<Coordinate, 3>> fill_triangles_;
-  std::vector<MatchedRoute> matched_routes_;
+  std::map<std::string, MatchedRoute> matched_routes_;
 };
 
 class Tile {
@@ -749,7 +749,7 @@ class Tile {
     // fprintf(stderr, "Painted %d way segments on tile z=%d, x=%d, y=%d\n", count, z_, x_, y_);
   }
 
-  void paintHeatmap(const std::vector<MatchedRoute>& matched_routes) {
+  void paintHeatmap(const std::map<std::string, MatchedRoute>& matched_routes) {
     // Traditional Strava heatmap gradient: dark red for lightly traveled pixels, through
     // orange and yellow, up to a white-hot core for the most heavily traveled ones.
     static const std::vector<cv::Scalar> heatmap_colors = {
@@ -765,7 +765,7 @@ class Tile {
     cv::Mat accumulator(TILE_SIZE, TILE_SIZE, CV_32FC1, cv::Scalar(0));
     cv::Mat route_mask(TILE_SIZE, TILE_SIZE, CV_8UC1);
 
-    for (const auto& matched_route : matched_routes) {
+    for (const auto& [activity_id, matched_route] : matched_routes) {
       const auto& route = matched_route.route.route;
       if (route.size() < 2) {
         continue;
@@ -1357,6 +1357,7 @@ class SquadratTileGenerator : public TileGenerator {
     addRoutes(matched_routes);
   }
 
+  // TODO: Handle duplicate activity IDs
   void addRoutes(const std::vector<MatchedRoute>& matched_routes) override {
     for (const auto& matched_route : matched_routes) {
       double visit_time = matched_route.route.getMilliseconds();
@@ -1425,6 +1426,7 @@ class TraversalTileGenerator : public TileGenerator {
     addRoutes(matched_routes);
   }
 
+  // TODO: Handle duplicate activity IDs
   void addRoutes(const std::vector<MatchedRoute>& matched_routes) override {
     std::unordered_map<std::size_t, WaySegment> traversal_counts;
     for (const auto& matched_route : matched_routes) {
@@ -1468,7 +1470,9 @@ class StravaHeatmapTileGenerator : public TileGenerator {
 
   void addRoutes(const std::vector<MatchedRoute>& matched_routes) override {
     std::scoped_lock<std::shared_mutex> full_lock(shared_mutex_);
-    matched_routes_.insert(matched_routes_.end(), matched_routes.begin(), matched_routes.end());
+    for (const auto& matched_route : matched_routes) {
+      matched_routes_.insert_or_assign(matched_route.route.activity_id, matched_route);
+    }
     clearCache();
   }
 
@@ -1478,7 +1482,7 @@ class StravaHeatmapTileGenerator : public TileGenerator {
   }
 
  private:
-  std::vector<MatchedRoute> matched_routes_;
+  std::map<std::string, MatchedRoute> matched_routes_;
 };
 
 static void persistHeatmap(const std::vector<MatchedRoute>& matched_routes, const std::string& heatmap_file_path_str) {
