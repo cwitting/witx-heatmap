@@ -21,6 +21,7 @@
 #include <opencv4/opencv2/opencv.hpp>
 #include <shared_mutex>
 #include <stdexcept>
+#include <string>
 #include <tuple>
 #include <unordered_map>
 #include <vector>
@@ -168,6 +169,10 @@ struct Route {
   std::string activity_id;
   std::string name;
   std::string date;
+  double distance{};
+  double elapsed_time{};
+  std::string description{};
+  std::string type{};
   int date_format{};
   std::vector<Coordinate> route;
   double getMilliseconds() const {
@@ -188,16 +193,20 @@ struct Route {
     return static_cast<double>(std::mktime(&tm)) * 1000.0;
   }
   double getDistance() const {
-    double distance = 0.0;
+    if (distance > 0) {
+      return distance;
+    }
+    double calc_distance = 0.0;
     for (std::size_t i = 1; i < route.size(); ++i) {
       double d = haversineDistance(route[i - 1], route[i]);
-      distance += d;
+      calc_distance += d;
     }
-    return distance;
+    return calc_distance;
   }
 };
 
-NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE(Route, link, athlete_id, activity_id, name, date, date_format, route)
+NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE(Route, link, athlete_id, activity_id, name, date, date_format, route, distance,
+                                   elapsed_time, description, type)
 
 struct WaySegment {
   std::string way_id;
@@ -496,6 +505,10 @@ static witxheatmap::PRoute routeToProto(const Route& route) {
   proto.set_activity_id(route.activity_id);
   proto.set_name(route.name);
   proto.set_date(route.date);
+  proto.set_distance(route.distance);
+  proto.set_elapsed_time(route.elapsed_time);
+  proto.set_description(route.description);
+  proto.set_type(route.type);
   for (const auto& coord : route.route) {
     auto* proto_coord = proto.add_route();
     proto_coord->set_lat(coord.lat);
@@ -511,6 +524,10 @@ static Route routeFromProto(const witxheatmap::PRoute& proto) {
   route.athlete_id = proto.athlete_id();
   route.name = proto.name();
   route.date = proto.date();
+  route.distance = proto.distance();
+  route.elapsed_time = proto.elapsed_time();
+  route.description = proto.description();
+  route.type = proto.type();
   route.route.reserve(proto.route_size());
   for (const auto& proto_coord : proto.route()) {
     route.route.push_back(Coordinate{proto_coord.lat(), proto_coord.lon()});
@@ -1743,6 +1760,16 @@ class User {
       Route route;
       route.link = feature["properties"]["link"];
       route.activity_id = feature["properties"]["activity_id"];
+      std::string dist_str = feature["properties"]["distance"];
+      std::string time_str = feature["properties"]["elapsed_time"];
+      if (!dist_str.empty()) {
+        route.distance = std::stod(dist_str);
+      }
+      if (!time_str.empty()) {
+        route.elapsed_time = std::stod(time_str);
+      }
+      route.description = feature["properties"]["description"];
+      route.type = feature["properties"]["type"];
       route.athlete_id = id;
       if (activity_id_blacklist.end() !=
           std::find(activity_id_blacklist.begin(), activity_id_blacklist.end(), route.activity_id)) {
@@ -1978,6 +2005,11 @@ void ActivityIngester::ingestFolder(const std::string& ingest_folder_str, bool m
       route.activity_id = activity_json.value("id_str", "");
       route.link = "https://www.strava.com/activities/" + route.activity_id;
       route.athlete_id = activity_json["athlete"].value("id_str", "");
+      route.distance = activity_json.value("distance", 0.0);
+      route.elapsed_time = activity_json.value("elapsed_time", 0.0);
+      if (!activity_json.at("description").is_null()) {
+        route.description = activity_json.value("description", "");
+      }
       route.date = activity_json.value("start_date", "");
       route.date_format = 1;
       std::string polyline = activity_json.at("map").value("polyline", "");

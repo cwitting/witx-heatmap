@@ -14,6 +14,10 @@ message PRoute {
   string date = 4;
   repeated PCoordinate route = 5;
   string athlete_id = 6;
+  string description = 7;
+  double distance = 8;
+  double elapsed_time = 9;
+  string type = 10;
 }
 
 message PWaySegment {
