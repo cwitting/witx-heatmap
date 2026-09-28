@@ -37,7 +37,7 @@ const std::set<std::string> activity_id_blacklist = {
     "5055464955",
 };
 
-#define RAW_TILE_SIZE 512
+#define RAW_TILE_SIZE 256
 #define TILE_SIZE_BUFFER 20
 #define TILE_SIZE (RAW_TILE_SIZE + 2 * TILE_SIZE_BUFFER)
 constexpr double TILE_SIZE_EXTRA_RATIO = (static_cast<double>(TILE_SIZE) / RAW_TILE_SIZE - 1.0) / 2.0;
@@ -755,7 +755,7 @@ class Tile {
         double age = segment.getLastVisitAge();  // days
         // double thickness = std::clamp(5.0 * (1.0 - age / 365.0), 1.0, 5.0);  // Clamp thickness between 1 and 5
         // pixels
-        double thickness = 4.0;  // Default thickness for the line
+        double thickness = 2.0;  // Default thickness for the line
         cv::line(image_data_, toPixel(p1), toPixel(p2), segment.getLastVisitColor(), static_cast<int>(thickness),
                  cv::LINE_AA);
       }
@@ -797,7 +797,7 @@ class Tile {
             (p1_px.y < -extra && p2_px.y < -extra) || (p1_px.y > TILE_SIZE + extra && p2_px.y > TILE_SIZE + extra)) {
           continue;
         }
-        cv::line(route_mask, p1_px, p2_px, cv::Scalar(255), 2, cv::LINE_AA);
+        cv::line(route_mask, p1_px, p2_px, cv::Scalar(255), 1, cv::LINE_AA);
         drew_any = true;
       }
       if (drew_any) {
@@ -810,7 +810,7 @@ class Tile {
     // A small blur gives tracks the soft glow Strava's heatmap tiles have.
     int kernel_size = 1;
     if (z_ > 15) {
-      kernel_size = 5;
+      kernel_size = 3;
     }
     if (kernel_size > 1) {
       cv::GaussianBlur(accumulator, accumulator, cv::Size(kernel_size, kernel_size), 0);
@@ -846,7 +846,7 @@ class Tile {
       for (size_t i = 1; i < matched_route.route.route.size(); ++i) {
         const auto& p1 = matched_route.route.route[i - 1];
         const auto& p2 = matched_route.route.route[i];
-        cv::line(image_data_, toPixel(p1), toPixel(p2), cv::Scalar(255, 0, 0, 255), 4, cv::LINE_AA);
+        cv::line(image_data_, toPixel(p1), toPixel(p2), cv::Scalar(255, 0, 0, 255), 2, cv::LINE_AA);
       }
     }
     // fprintf(stderr, "Painted %d way segments on tile z=%d, x=%d, y=%d\n", count, z_, x_, y_);
@@ -864,7 +864,7 @@ class Tile {
     cv::Scalar grey(20, 20, 20, alpha);
     for (const auto& [q, r] : hexesOverlappingTile(tile_size)) {
       auto polygon = hexToPixelPolygon(SquadratTile::hexVertices(q, r, tile_size));
-      cv::polylines(image_data_, polygon, /*isClosed=*/true, grey, 2, cv::LINE_AA);
+      cv::polylines(image_data_, polygon, /*isClosed=*/true, grey, 1, cv::LINE_AA);
     }
   }
 
@@ -985,7 +985,7 @@ class Tile {
             cv::Point label_pos_pct = cv::Point(cvRound(center.x + label_radius * std::cos(angle_rad)),
                                                 cvRound(center.y + label_radius * std::sin(angle_rad)));
             std::string pct_text = std::to_string(static_cast<int>(std::round(fraction * 100))) + "%";
-            paintCenterText(pct_text, label_pos_pct, 0.6);
+            paintCenterText(pct_text, label_pos_pct, 0.3);
           }
         }
       }
@@ -1002,7 +1002,7 @@ class Tile {
     }
 
     for (const auto& [p1, p2] : alpha_shape.getBoundaryEdges()) {
-      cv::line(image_data_, toPixel(p1), toPixel(p2), cv::Scalar(255, 0, 255, 200), 6, cv::LINE_AA);
+      cv::line(image_data_, toPixel(p1), toPixel(p2), cv::Scalar(255, 0, 255, 200), 3, cv::LINE_AA);
     }
   }
 
@@ -1034,8 +1034,8 @@ class Tile {
   }
 
  private:
-  void paintCenterText(const std::string& text, const cv::Point& center, double font_scale = 0.8) {
-    constexpr int thickness = 2;
+  void paintCenterText(const std::string& text, const cv::Point& center, double font_scale = 0.4) {
+    constexpr int thickness = 1;
     constexpr int font_face = cv::FONT_HERSHEY_SIMPLEX;
     cv::Size textsize = cv::getTextSize(text, font_face, font_scale, thickness, nullptr);
     cv::Point text_org(center.x - textsize.width / 2, center.y + textsize.height / 2);
