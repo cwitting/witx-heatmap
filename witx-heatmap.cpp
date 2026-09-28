@@ -39,6 +39,10 @@ const std::set<std::string> activity_id_blacklist = {
     "5094430067",
 };
 
+static bool isActivityIdBlacklisted(const std::string& activity_id) {
+  return activity_id_blacklist.find(activity_id) != activity_id_blacklist.end();
+}
+
 #define RAW_TILE_SIZE 256
 #define TILE_SIZE_BUFFER 20
 #define TILE_SIZE (RAW_TILE_SIZE + 2 * TILE_SIZE_BUFFER)
@@ -1661,7 +1665,8 @@ class User {
       }
       matched_routes.reserve(heatmap_proto.matched_routes_size());
       for (const auto& proto_matched_route : heatmap_proto.matched_routes()) {
-        matched_routes.push_back(matchedRouteFromProto(proto_matched_route));
+        if (!isActivityIdBlacklisted(proto_matched_route.route().activity_id()))
+          matched_routes.push_back(matchedRouteFromProto(proto_matched_route));
       }
 #endif
     }
@@ -1772,8 +1777,7 @@ class User {
       route.description = feature["properties"]["description"];
       route.type = feature["properties"]["type"];
       route.athlete_id = id;
-      if (activity_id_blacklist.end() !=
-          std::find(activity_id_blacklist.begin(), activity_id_blacklist.end(), route.activity_id)) {
+      if (isActivityIdBlacklisted(route.activity_id)) {
         continue;
       }
       route.name = feature["properties"]["name"];
