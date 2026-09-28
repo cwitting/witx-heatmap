@@ -1853,6 +1853,18 @@ class User {
     });
 
     {
+      TimerLog alpha_shapes_timer("Generating alpha shapes for radius 7000");
+      auto it = alpha_shapes.emplace(
+          7000, std::make_unique<AlphaShapeTileGenerator>(matched_routes, static_cast<double>(7000)));
+      tile_generators_.push_back(it.first->second.get());
+    }
+
+    registerTileRoute(svr, url_path + R"(/coverage/(\d+)/(\d+)/(\d+).png)", [this](const httplib::Request& req) {
+      int radius = req.has_param("radius") ? std::stoi(req.get_param_value("radius")) : 0;
+      return getByRadius(alpha_shapes, radius);
+    });
+
+    {
       TimerLog squadrat_tiles_timer("Generating squadrats for radius 1000");
       auto it = squadrat_tile_generators.emplace(
           1000, std::make_unique<SquadratTileGenerator>(matched_routes, static_cast<double>(1000)));
