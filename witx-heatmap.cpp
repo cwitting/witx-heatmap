@@ -36,6 +36,7 @@
 
 const std::set<std::string> activity_id_blacklist = {
     "5055464955",
+    "5094430067",
 };
 
 #define RAW_TILE_SIZE 256
